@@ -1,0 +1,66 @@
+# OpenTelemetry to Application Insights
+
+All three runners emit spans to Application Insights when a connection string is set. Without it nothing is exported.
+
+## 1. Get an App Insights resource
+
+A Foundry project usually has one connected (Foundry portal → project → **Tracing**, or Management center → Connected
+resources). Otherwise create one and connect it:
+
+```powershell
+az monitor app-insights component create -a <name> -g <rg> -l <region> --kind web   # needs: az extension add -n application-insights
+az resource show --ids <appinsights-resource-id> --query properties.ConnectionString -o tsv
+```
+
+If the portal already connects one to the project, Foundry's own service spans (`responsesapi`: `invoke_agent`, `chat <model>`,
+`execute_tool`) land in it too.
+
+## 2. Configure
+
+In `.env` (treat the connection string as a secret; never commit it):
+
+```
+APPLICATIONINSIGHTS_CONNECTION_STRING=InstrumentationKey=...;IngestionEndpoint=...
+# APPLICATIONINSIGHTS_USE_AAD=1     # if the resource disables local (key) auth; needs Monitoring Metrics Publisher
+# OTEL_SERVICE_NAME=...             # overrides the cloud role name
+```
+
+Run the runners with the venv python (it has `azure-monitor-opentelemetry-exporter`). Ingestion lags 2–3 minutes.
+
+## 3. What is emitted
+
+| Cloud role | Spans |
+| --- | --- |
+| `foundry-toolbox-tests` | `toolbox.test_case` (case id, kind, tool, pass/fail, latency) |
+| `foundry-agent-evals` | `eval.turn` (`eval.conversation_id`, `eval.category`, `eval.passed`, `eval.failures`) |
+| `foundry-agent-target` | `foundry_agent` (`gen_ai.agent.name`, `eval.platform_abort`), `tool:*` (`gen_ai.tool.name`) |
+| `responsesapi` (Foundry) | `invoke_agent`, `chat <model>`, `execute_tool` with real tool durations |
+
+The target injects a W3C `traceparent` into the Responses call, so server spans share the `operation_Id` of the eval turn
+and you can see one trace from eval turn to model and tool calls. Tool spans created by the target are zero-duration
+markers; use the server-side `execute_tool` spans for tool latency.
+
+## 4. Query
+
+Portal → App Insights → Logs (spans are in `dependencies`):
+
+```kusto
+// eval pass rate by day
+dependencies | where name == "eval.turn"
+| summarize turns=count(), passed=countif(tostring(customDimensions["eval.passed"]) =~ "true") by bin(timestamp, 1d)
+
+// tool latency from Foundry's server-side spans
+dependencies | where cloud_RoleName == "responsesapi" and name startswith "execute_tool"
+| summarize p50=percentile(duration,50), p95=percentile(duration,95), n=count() by name
+
+// full trace for one eval turn
+dependencies | where operation_Id == "<id>" | project timestamp, cloud_RoleName, name, duration | order by timestamp asc
+```
+
+From the CLI:
+
+```powershell
+'{"query":"dependencies | take 5"}' | Set-Content q.json
+az rest --method post --resource https://api.applicationinsights.io `
+  --url https://api.applicationinsights.io/v1/apps/<appId>/query --headers "Content-Type=application/json" --body "@q.json"
+```

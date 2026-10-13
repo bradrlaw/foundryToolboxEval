@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import statistics
 import subprocess
@@ -18,6 +19,19 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+from evals import telemetry  # noqa: E402
+
+
+def load_env(path: Path) -> None:
+    """Minimal .env loader so the runner works with the standard library only."""
+    if not path.exists():
+        return
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if line and not line.startswith("#") and "=" in line:
+            key, _, value = line.partition("=")
+            os.environ.setdefault(key.strip(), value.strip().strip('"'))
 
 
 def get_token(scope: str) -> str:
@@ -184,6 +198,18 @@ def run_auth_case(endpoint: str, case: dict) -> dict:
 
 
 def run_case(client: McpClient, case: dict) -> dict:
+    with telemetry.span("toolbox.test_case", **{
+        "eval.kind": "tool", "eval.case_id": case["case_id"], "eval.category": case["category"],
+        "gen_ai.tool.name": case.get("tool", case.get("kind", "call")),
+    }) as sp:
+        result = _run_case(client, case)
+        sp.set_attribute("eval.passed", result["passed"])
+        sp.set_attribute("eval.latency_p50_ms", result["latency_p50_ms"])
+        sp.set_attribute("eval.failures", "; ".join(result["failures"]))
+        return result
+
+
+def _run_case(client: McpClient, case: dict) -> dict:
     kind = case.get("kind", "call")
     if kind == "list":
         return run_list_case(client, case)
@@ -223,6 +249,8 @@ def main() -> int:
     ap.add_argument("--out", type=Path, default=ROOT / "results" / "tool-tests")
     args = ap.parse_args()
 
+    load_env(ROOT / ".env")
+    telemetry.init("foundry-toolbox-tests")
     cfg = json.loads(args.config.read_text())["toolbox"]
     client = McpClient(cfg["mcp_endpoint"], get_token(cfg.get("token_scope", "https://ai.azure.com/.default")))
     client.initialize()

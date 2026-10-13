@@ -2,3 +2,4 @@ assert-ai[azure-auth]==0.3.0
 mcp==2.3.0
 python-dotenv==1.2.4
 # Do not add azure-ai-projects: it needs openai>=3, which conflicts with assert-ai.
+azure-monitor-opentelemetry-exporter==1.0.0b58

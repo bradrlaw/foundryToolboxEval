@@ -15,15 +15,14 @@ from pathlib import Path
 from azure.identity import AzureCliCredential
 from dotenv import load_dotenv
 from opentelemetry import trace
-from opentelemetry.sdk.trace import TracerProvider
+
+from evals import telemetry
 
 # Environment-specific values live in the git-ignored .env at the repo root.
 load_dotenv(Path(__file__).resolve().parents[2] / ".env")
 
-_existing = trace.get_tracer_provider()
-if not isinstance(_existing, TracerProvider):
-    if not isinstance(getattr(_existing, "_real_provider", None), TracerProvider):
-        trace.set_tracer_provider(TracerProvider())
+# Reuses ASSERT's tracer provider if present; adds an App Insights exporter when configured.
+telemetry.init("foundry-agent-target")
 
 _tracer = trace.get_tracer("foundry_agent_target")
 _credential = AzureCliCredential()
@@ -46,10 +45,14 @@ def _token() -> str:
 
 def _post_responses(payload: dict) -> dict:
     token = _token()
+    headers = {"Authorization": "Bearer " + token, "Content-Type": "application/json"}
+    if telemetry.AVAILABLE:
+        from opentelemetry.propagate import inject
+        inject(headers)  # traceparent, so Foundry's server-side spans join our trace
     req = urllib.request.Request(
         f"{PROJECT_ENDPOINT}/openai/v1/responses",
         data=json.dumps(payload).encode(),
-        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+        headers=headers,
     )
     for attempt in range(8):
         try:
@@ -83,6 +86,8 @@ def run_agent(messages: list[dict[str, str]]) -> dict:
     start = time.perf_counter()
     with _tracer.start_as_current_span("foundry_agent") as span:
         span.set_attribute("openinference.span.kind", "AGENT")
+        span.set_attribute("gen_ai.operation.name", "invoke_agent")
+        span.set_attribute("gen_ai.agent.name", AGENT_NAME)
         span.set_attribute("input.value", messages[-1]["content"])
         try:
             data = _post_responses({
@@ -93,6 +98,7 @@ def run_agent(messages: list[dict[str, str]]) -> dict:
             if "Responses API 400" in str(e) and "An error occurred invoking" in str(e):
                 m = re.search(r"invoking '([^']+)'", str(e))
                 text = f"{PLATFORM_ABORT_NOTE} {e}"
+                span.set_attribute("eval.platform_abort", True)
                 span.set_attribute("output.value", text)
                 return {
                     "text": text, "platform_abort": True,
@@ -108,6 +114,8 @@ def run_agent(messages: list[dict[str, str]]) -> dict:
                 calls.append({"name": item.get("name", ""), "arguments": json.loads(item.get("arguments") or "{}"), "output": out})
                 with _tracer.start_as_current_span(f"tool:{item.get('name')}") as tool:
                     tool.set_attribute("openinference.span.kind", "TOOL")
+                    tool.set_attribute("gen_ai.operation.name", "execute_tool")
+                    tool.set_attribute("gen_ai.tool.name", item.get("name", ""))
                     tool.set_attribute("tool.name", item.get("name", ""))
                     tool.set_attribute("input.value", item.get("arguments") or "{}")
                     tool.set_attribute("output.value", out)

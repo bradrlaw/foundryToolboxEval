@@ -12,7 +12,7 @@ Terminology: *tests* call the toolbox directly; *evals* involve an agent.
 This repo is independent of `copilot-studio-evals`; it reuses the idea of a canonical
 JSONL format but defines its own schemas.
 
-See [docs/plan.md](docs/plan.md) for the plan and open questions.
+Docs: [getting started](docs/getting-started.md) (deploy and run the samples), [existing environment](docs/existing-environment.md) (your own Foundry project/toolbox/agents), [telemetry](docs/telemetry.md) (App Insights), [plan](docs/plan.md).
 
 ## Layout
 
@@ -75,5 +75,6 @@ Tool-test case kinds: `call` (default), `list` (tools/list checks), `auth` (bad/
 python scripts\report.py tool  [run.json] [--baseline older.json]     # newest run by default
 python scripts\report.py agent [run.json] [--baseline older.json]
 python scripts\report.py assert results\assert\results\<suite>\<run> [--baseline <other run dir>] [--out report.md]
-```n
+```r
+
 ASSERT behavior configs (one atomic behavior each): `evals\configs\ungrounded_figures.yaml`, `evals\configs\tool_error_handling.yaml` (the second catches raw platform-failure replies and leaked internals).

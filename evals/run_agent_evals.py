@@ -14,6 +14,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+from evals import telemetry  # noqa: E402
 
 
 def _value_matches(expected, actual) -> bool:
@@ -74,12 +76,18 @@ def run_conversations(cases: list[dict], agent) -> list[dict]:
         history: list[dict[str, str]] = []
         for case in sorted(turns, key=lambda t: t["turn_number"]):
             history.append({"role": "user", "content": case["user_message"]})
-            try:
-                res = agent(history)
-                failures = score_turn(case, res)
-            except Exception as e:  # a transport failure should fail the turn, not the run
-                res = {"text": "", "tool_calls": [], "latency_ms": 0, "platform_abort": False}
-                failures = [f"runner error: {e}"]
+            with telemetry.span("eval.turn", **{
+                "eval.kind": "agent", "eval.conversation_id": conv_id,
+                "eval.turn_number": case["turn_number"], "eval.category": case["category"],
+            }) as sp:
+                try:
+                    res = agent(history)
+                    failures = score_turn(case, res)
+                except Exception as e:  # a transport failure should fail the turn, not the run
+                    res = {"text": "", "tool_calls": [], "latency_ms": 0, "platform_abort": False}
+                    failures = [f"runner error: {e}"]
+                sp.set_attribute("eval.passed", not failures)
+                sp.set_attribute("eval.failures", "; ".join(failures))
             history.append({"role": "assistant", "content": res["text"]})
             results.append({
                 "conversation_id": conv_id, "turn_number": case["turn_number"], "category": case["category"],
@@ -99,6 +107,7 @@ def main() -> int:
 
     from dotenv import load_dotenv
     load_dotenv(ROOT / ".env")
+    telemetry.init("foundry-agent-evals")
     from evals.foundry_agent.target import run_agent
 
     cases = [json.loads(l) for p in args.cases for l in p.read_text(encoding="utf-8").splitlines() if l.strip()]
