@@ -26,7 +26,7 @@ Docs: [getting started](docs/getting-started.md) (deploy and run the samples), [
 | `deploy/` | Notes and script for the deployed sample toolbox |
 | `sample-mcp-server/` | Synthetic MCP server (`get_customer`, `get_market_conditions`, `get_stock_quote`) to deploy and test against; run with `python sample-mcp-server\server.py` (`http://localhost:8000/mcp`) |
 | `tests/` | Unit tests (`python -m unittest discover tests`) |
-| `scripts/` | Validators and runners |
+| `scripts/` | Validators, runners, `deploy_toolbox.py` (connection + toolbox), `deploy_agent.py` |
 | `results/` | Run output (git-ignored) |
 
 ## Status

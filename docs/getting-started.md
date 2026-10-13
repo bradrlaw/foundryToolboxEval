@@ -53,11 +53,16 @@ The MCP URL is `https://<app-fqdn>/mcp`. It is unauthenticated, so use only synt
 
 ## 4. Create the connection and toolbox
 
-Done in the Foundry portal (project → **Tools / Toolboxes**):
+Scripted (idempotent; each run publishes a new toolbox version and makes it the default):
 
-1. Add a **custom MCP (remote tool)** connection named `sample-mcp-conn` with the URL above, auth **None**.
-2. Create a toolbox named `sample-customer-toolbox` that includes that connection's tools (server label `sample`).
-   Publish version 1 as default.
+```powershell
+.\.venv\Scripts\python scripts\deploy_toolbox.py --mcp-url https://<app-fqdn>/mcp --resource-group <foundry-resource-group>
+```
+
+It creates the project connection `sample-mcp-conn` (category `RemoteTool`, auth none) and the toolbox
+`sample-customer-toolbox` (server label `sample`). The account and project come from `FOUNDRY_PROJECT_ENDPOINT` in `.env`;
+`--connection`, `--server-label`, `--toolbox` and `--subscription` override defaults, and `--delete` removes both.
+Needs Contributor on the Foundry resource and Azure AI User on the project. The portal (project → **Tools**) works too.
 
 The toolbox consumer endpoint is
 `<project endpoint>/toolboxes/sample-customer-toolbox/mcp?api-version=v1`. Tools appear as

@@ -33,6 +33,12 @@ Invoke: `POST {project}/openai/v1/responses` with `agent_reference`.
 
 ## Redeploy
 
+Recreate the connection and toolbox (new toolbox version, promoted to default):
+
+```powershell
+python scripts/deploy_toolbox.py --mcp-url https://<app-fqdn>/mcp --resource-group <foundry-rg>
+```
+
 ```powershell
 az acr build -r <acr-name> -t sample-mcp:v2 sample-mcp-server
 az containerapp update -n sample-mcp -g <sample-rg> --image <acr-name>.azurecr.io/sample-mcp:v2
