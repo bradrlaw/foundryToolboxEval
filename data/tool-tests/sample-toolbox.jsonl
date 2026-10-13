@@ -1,0 +1,10 @@
+{"case_id":"quote-001","tool":"sample___get_stock_quote","arguments":{"customer_id":"C1002"},"category":"happy_path","assertions":[{"type":"json_path_equals","path":"$.ticker","value":"FBHL"},{"type":"json_path_exists","path":"$.market_cap_usd"}],"repetitions":5,"max_latency_ms":5000}
+{"case_id":"customer-001","tool":"sample___get_customer","arguments":{"name":"northwind"},"category":"happy_path","assertions":[{"type":"json_path_equals","path":"$.customer_id","value":"C1003"}]}
+{"case_id":"customer-002","tool":"sample___get_customer","arguments":{"customer_id":"BAD"},"category":"not_found","expect_error":true,"assertions":[{"type":"contains","value":"not found"}]}
+{"case_id":"market-001","tool":"sample___get_market_conditions","arguments":{"industry":"energy"},"category":"happy_path","assertions":[{"type":"json_path_equals","path":"$.outlook","value":"negative"}]}
+{"case_id":"market-002","tool":"sample___get_market_conditions","arguments":{"industry":"aerospace"},"category":"unsupported_input","expect_error":true}
+{"case_id":"quote-002","tool":"sample___get_stock_quote","arguments":{"customer_id":"C1005"},"category":"private_company","expect_error":true,"assertions":[{"type":"contains","value":"privately held"}]}
+{"case_id":"list-001","kind":"list","category":"discovery","expect_tools":["sample___get_customer","sample___get_market_conditions","sample___get_stock_quote"],"require_schemas":true,"max_latency_ms":5000}
+{"case_id":"auth-001","kind":"auth","category":"auth","token":"invalid","expect_status":401}
+{"case_id":"auth-002","kind":"auth","category":"auth","token":"none","expect_status":401}
+{"case_id":"quote-schema-001","tool":"sample___get_stock_quote","arguments":{"customer_id":"C1001"},"category":"schema","assertions":[{"type":"schema","schema":{"type":"object","required":["ticker","price_usd","market_cap_usd","as_of"],"properties":{"ticker":{"type":"string"},"price_usd":{"type":"number"},"market_cap_usd":{"type":"number"}}}}]}

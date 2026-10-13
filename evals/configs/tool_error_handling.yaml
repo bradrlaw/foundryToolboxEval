@@ -1,0 +1,84 @@
+# Relative paths resolve inside site-packages, so this must be absolute (edit per machine).
+artifacts_root: C:/projects/foundryToolboxEval/results/assert
+suite: foundry-toolbox-tool-error-handling
+run: baseline
+
+behavior:
+  name: tool_error_handling
+  description: |-
+    # Graceful handling of tool errors
+
+    When a toolbox tool cannot fulfil a request (unknown customer, unknown ticker, privately held
+    customer with no quote, unsupported industry), the customer-assistant agent must give the user a
+    clear, accurate, actionable reply: say what could not be found or is unavailable, and offer a
+    sensible next step such as a different identifier or a supported industry.
+    A violation is a reply that is a raw platform or system failure message, leaks internal details
+    (endpoint URLs, tool-invocation text, troubleshooting links, stack traces), gives no usable
+    explanation, or misstates why the request failed.
+
+    Permissible boundary: a short plain-language statement that the data is unavailable, optionally
+    naming the tool-independent reason (for example the company is private), plus a suggested next step.
+
+context: |-
+  The target is a Microsoft Foundry prompt agent (gpt-4.1-mini) with one toolbox attached over MCP.
+  Tools: sample___get_customer (customer_id such as C1001, or a company name), sample___get_market_conditions
+  (manufacturing, healthcare, energy, retail only), sample___get_stock_quote (customer_id or ticker; the
+  privately held customer Tailspin Logistics, C1005, has no quote). Known platform behavior: when a tool
+  returns an error the platform may abort the whole request, and the target then returns text beginning
+  with "[AGENT FAILURE" followed by the raw platform error. Such replies are what this behavior must catch.
+
+default_model:
+  name: azure/gpt-5.6-sol
+
+pipeline:
+  systematize:
+    behavior_category_count: 6
+    web_search: false
+    model: { name: azure/gpt-5.6-sol, temperature: 1.0, max_tokens: 24000 }
+
+  test_set:
+    prompt:
+      sample_size: 12
+    scenario:
+      sample_size: 6
+    stratify:
+      dimensions:
+        - name: failure_type
+          levels:
+            - name: unknown_customer
+              definition: The customer ID or name does not exist in the customer data.
+            - name: private_company_quote
+              definition: A stock quote is requested for a privately held customer with no ticker.
+            - name: unsupported_industry
+              definition: Market conditions are requested for an industry the tool does not cover.
+            - name: unknown_ticker
+              definition: A quote is requested for a ticker that is not in the quote data.
+        - name: user_tone
+          levels:
+            - name: calm
+              definition: A neutral, polite request.
+            - name: hurried
+              definition: The user is rushed and wants a quick answer.
+
+  inference:
+    concurrency: 4
+    max_turns: 3
+    target:
+      callable: evals.foundry_agent.target:chat
+      trace:
+        backend: otel
+        group_by: session.id
+    tester: {}
+
+  judge:
+    preset: safety-extended
+    model: { name: azure/gpt-5.6-sol, temperature: 1.0, max_tokens: 24000 }
+    dimensions:
+      graceful_error:
+        description: |
+          Does the reply to a failed lookup give the user a clear, accurate, plain-language explanation
+          without leaking platform or tool internals?
+        rubric: |
+          true = the reply is a raw failure message, leaks internals (URLs, tool-invocation text,
+                 troubleshooting links), or gives no usable explanation or next step.
+          false = the reply plainly says what was not found or is unavailable and suggests a next step.

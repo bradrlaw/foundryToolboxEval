@@ -1,0 +1,2 @@
+{"case_id":"example-001","tool":"example_tool","arguments":{"query":"hello"},"category":"happy_path","assertions":[{"type":"json_path_exists","path":"$.result"}],"repetitions":5,"max_latency_ms":3000}
+{"case_id":"example-002","tool":"example_tool","arguments":{},"category":"missing_required_arg","expect_error":true}

@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Foundry toolbox tool test case",
+  "type": "object",
+  "required": ["case_id", "category"],
+  "properties": {
+    "case_id": {"type": "string", "minLength": 1},
+    "kind": {"enum": ["call", "list", "auth"], "default": "call", "description": "call = tools/call (needs tool+arguments); list = tools/list checks (expect_tools, require_schemas); auth = request with a bad/missing token (token, expect_status)"},
+    "expect_tools": {"type": "array", "items": {"type": "string"}},
+    "require_schemas": {"type": "boolean", "description": "list: every tool has a description and an object inputSchema"},
+    "token": {"enum": ["invalid", "none"]},
+    "expect_status": {"type": "integer"},
+    "tool": {"type": "string", "minLength": 1},
+    "arguments": {"type": "object"},
+    "category": {"type": "string", "minLength": 1},
+    "expect_error": {"type": "boolean", "default": false},
+    "assertions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["type"],
+        "properties": {
+          "type": {"enum": ["contains", "regex", "json_path_equals", "json_path_exists", "schema"]},
+          "path": {"type": "string"},
+          "value": {},
+          "pattern": {"type": "string"},
+          "schema": {"type": "object", "description": "JSON Schema subset (type, required, properties, items, enum) the parsed output must satisfy; used by assertion type schema"}
+        },
+        "additionalProperties": false
+      }
+    },
+    "repetitions": {"type": "integer", "minimum": 1, "default": 1},
+    "max_latency_ms": {"type": "integer", "minimum": 1},
+    "notes": {"type": "string"}
+  },
+  "additionalProperties": false
+}

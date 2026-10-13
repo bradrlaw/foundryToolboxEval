@@ -1,0 +1,2 @@
+{"conversation_id":"ex-001","turn_number":1,"user_message":"Look up hello using the example tool.","expected_tool_calls":[{"tool":"example_tool","params":{"query":"hello"}}],"expected_response_pattern":"hello","pass_criteria":"both","category":"happy_path"}
+{"conversation_id":"ex-002","turn_number":1,"user_message":"What is 2+2?","expected_tool_calls":[],"must_not_call":["example_tool"],"pass_criteria":"tool_called_correctly","category":"no_tool_needed"}

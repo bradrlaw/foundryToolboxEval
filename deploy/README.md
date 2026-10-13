@@ -1,0 +1,41 @@
+# Sample toolbox deployment
+
+Real values for this deployment are kept in the git-ignored `deploy/resources.local.md`.
+
+| Item | Value |
+| --- | --- |
+| Foundry resource / project | `<foundry-resource>` (rg `<foundry-rg>`) / `<project>` |
+| MCP host | Container App `sample-mcp` in `<sample-rg>` (`<region>`), ACR `<acr-name>` |
+| Project connection | `sample-mcp-conn` (category `RemoteTool`, auth `None`) |
+| Toolbox | `sample-customer-toolbox` (v1, default) |
+| Consumer endpoint | `{project_endpoint}/toolboxes/sample-customer-toolbox/mcp?api-version=v1` |
+
+The host is unauthenticated (synthetic data only). Calls to the toolbox need a bearer token for `https://ai.azure.com/.default`
+(`az account get-access-token --resource https://ai.azure.com`).
+
+## Findings
+
+- Toolbox tool names use `{server_label}___{tool}` (three underscores), e.g. `sample___get_customer`, not the dotted form shown in the docs.
+- Calling a name that isn't in the toolbox returns a JSON-RPC error (`No tool config matches tool name ...`), not a tool result.
+- Tool errors from the MCP server surface as `isError: true` with the original message.
+
+- **A tool error aborts the whole agent request.** When an MCP tool returns `isError: true` while an agent is calling it through the toolbox,
+  the Responses API returns HTTP 400 (`An error occurred invoking 'sample___...'`) instead of giving the error to the model.
+  The agent cannot say "that customer was not found"; callers must handle the 400. Direct toolbox calls are unaffected (tool tests see `isError`).
+  The ASSERT target reports this as an `[AGENT FAILURE ...]` reply so it is scored.
+- Responses API calls can hit transient DNS errors; the target retries.
+
+## Agent
+
+Prompt agent `customer-assistant` (model `gpt-4-1-mini`) with the toolbox endpoint as an MCP tool (`require_approval: never`).
+Create a new version with `python scripts/deploy_agent.py [--model <deployment>]`.
+Invoke: `POST {project}/openai/v1/responses` with `agent_reference`.
+
+## Redeploy
+
+```powershell
+az acr build -r <acr-name> -t sample-mcp:v2 sample-mcp-server
+az containerapp update -n sample-mcp -g <sample-rg> --image <acr-name>.azurecr.io/sample-mcp:v2
+```
+
+If `az acr build` crashes printing logs (Windows codepage), set `$env:PYTHONIOENCODING="utf-8"`; the build still completes.
