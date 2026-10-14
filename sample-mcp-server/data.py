@@ -45,6 +45,39 @@ class ToolError(ValueError):
     pass
 
 
+# App roles of the server's Entra API app (AUTH_MODE=entra) and the customer regions they unlock.
+# scripts/setup_entra.py creates the same roles.
+ALL_REGIONS_ROLE = "Customers.Read.All"
+REGION_ROLES = {
+    "Customers.Read.NorthAmerica": "North America",
+    "Customers.Read.Europe": "Europe",
+    "Customers.Read.APAC": "APAC",
+}
+
+
+def visible_regions(roles) -> list[str]:
+    """Customer regions a caller with these app roles may read."""
+    if ALL_REGIONS_ROLE in roles:
+        return sorted(REGION_ROLES.values())
+    return sorted({REGION_ROLES[r] for r in roles if r in REGION_ROLES})
+
+
+def access_denied(customer: dict, roles) -> dict | None:
+    """None if the roles cover the customer's region, otherwise a denial result.
+
+    The denial is a normal tool result rather than an error: a tool error aborts the whole
+    agent response in Foundry, while a result lets the agent explain the denial to the user.
+    """
+    region = customer["region"]
+    if region in visible_regions(roles):
+        return None
+    needed = [role for role, r in REGION_ROLES.items() if r == region] + [ALL_REGIONS_ROLE]
+    return {"access_denied": True, "customer_id": customer["customer_id"], "region": region,
+            "reason": f"Customer {customer['customer_id']} is in the {region} region, and the signed-in user "
+                      f"has no app role for it. Required: {' or '.join(needed)}.",
+            "required_roles": needed}
+
+
 def get_customer(customer_id: str | None = None, name: str | None = None) -> dict:
     if customer_id:
         record = CUSTOMERS.get(customer_id.strip().upper())

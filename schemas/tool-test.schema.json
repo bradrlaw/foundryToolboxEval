@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Foundry toolbox tool test case",
-  "description": "One JSON object per line of a data/tool-tests/*.jsonl file. Validate with scripts/validate_eval_jsonl.py, which also flags fields the case's kind ignores and duplicate case_ids.",
+  "description": "One JSON object per line of a data/tool-tests/*.jsonl file. Strings may use {{caller.oid}}, {{caller.tid}}, {{caller.name}} or {{caller.username}}, filled from the signed-in user's token (regex-escaped in regex patterns). Validate with scripts/validate_eval_jsonl.py, which also flags fields the case's kind ignores, duplicate case_ids and unknown placeholders.",
   "type": "object",
   "required": ["case_id", "category"],
   "properties": {
@@ -17,7 +17,7 @@
     "expect_error": {
       "enum": [false, true, "tool", "protocol"],
       "default": false,
-      "description": "call: false = the call succeeds; true or \"tool\" = the tool returns a result with isError; \"protocol\" = the toolbox rejects the request with a JSON-RPC error (e.g. a tool name it has no config for). HTTP and transport failures always fail the case."
+      "description": "call: false = the call succeeds; true or \"tool\" = the tool returns a result with isError; \"protocol\" = the toolbox rejects the request with a JSON-RPC error (e.g. a tool name it has no config for). Tool-source failures (consent_required, upstream_error) and HTTP or transport failures always fail the case."
     },
     "assertions": {"type": "array", "items": {"$ref": "#/$defs/assertion"}},
     "repetitions": {"type": "integer", "minimum": 1, "default": 1},

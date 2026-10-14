@@ -9,11 +9,16 @@ $FOUNDRY_PROJECT_ENDPOINT/toolboxes/<--toolbox, $FOUNDRY_TOOLBOX_NAME or sample-
 Results are written to results/tool-tests/run-<UTC timestamp>.json.
 
 Each request ends in one outcome: ok, tool_error (a result with isError), protocol_error (a JSON-RPC
-error such as an unknown tool), invalid_result (a result that breaks the tool's output schema),
-transport_error (HTTP or network failure, or timeout) or runner_error. A case passes when every run
-has the expected outcome and passes its assertions; assertions only run on the expected outcome.
+error such as an unknown tool), consent_required (the signed-in user has not yet consented to a tool
+source's OAuth connection), upstream_error (the toolbox could not reach or authenticate to a tool
+source), invalid_result (a result that breaks the tool's output schema), transport_error (HTTP or network
+failure, or timeout) or runner_error. A case passes when every run has the expected outcome and passes
+its assertions; assertions only run on the expected outcome.
 
-Exit codes: 0 all cases passed, 1 some failed, 2 setup error (cases, config, sign-in or connection).
+Cases may use {{caller.oid}}, {{caller.tid}}, {{caller.name}} and {{caller.username}}, filled from the
+signed-in user's token. Consent links are printed to the console only, never saved.
+
+Exit codes: 0 all cases passed, 1 some failed, 2 setup error (cases, config, sign-in, consent or connection).
 """
 from __future__ import annotations
 
@@ -46,8 +51,8 @@ from mcp.shared.exceptions import MCPError
 from mcp.types import CONNECTION_CLOSED, REQUEST_TIMEOUT, Implementation
 from pydantic import ValidationError
 
-from evals import __version__, auth, telemetry
-from evals.cases import ROOT, CaseError, format_error, load_cases, schema_validator
+from evals import __version__, auth, telemetry, toolbox_errors
+from evals.cases import ROOT, CaseError, fill_caller, format_error, load_cases, schema_validator
 
 CLIENT_INFO = Implementation(name="foundry-toolbox-tests", version=__version__)
 AUTH_PROBE_PROTOCOL = "2025-11-25"
@@ -61,6 +66,10 @@ SESSION_CLOSED = (anyio.ClosedResourceError, anyio.BrokenResourceError, anyio.En
 
 class SetupError(RuntimeError):
     """Configuration or connection problem that stops the whole run (exit code 2)."""
+
+    def __init__(self, message: str, consent: list[tuple[str, str]] | None = None):
+        super().__init__(message)
+        self.consent = consent or []  # (tool source, consent link): print, never record
 
 
 @dataclass
@@ -118,6 +127,12 @@ class BearerAuth(httpx2.Auth):
 
 def _ms(start: float) -> float:
     return (time.perf_counter() - start) * 1000
+
+
+def _username(scope: str) -> str | None:
+    with contextlib.suppress(Exception):  # only used to word a console hint
+        return auth.caller_claims(scope).get("username")
+    return None
 
 
 def _clip(text: str, limit: int = 200) -> str:
@@ -262,6 +277,10 @@ class Toolbox:
             if http or e.code in (CONNECTION_CLOSED, REQUEST_TIMEOUT):
                 detail = "; ".join(map(str, http)) or f"MCP error {e.code}: {e}"
                 return Outcome("transport_error", detail, latency_ms=latency)
+            if failure := toolbox_errors.classify(e.message, e.data, e.code):
+                if failure.consent:
+                    toolbox_errors.announce_consent(failure.consent, _username(self.target.scope))
+                return Outcome(failure.outcome, failure.detail, latency_ms=latency)
             return Outcome("protocol_error", str(e), latency_ms=latency)
         except (RuntimeError, ValidationError) as e:  # output-schema or protocol-shape violations
             return Outcome("invalid_result", str(e), latency_ms=_ms(start))
@@ -307,13 +326,24 @@ def _leaves(error: BaseException) -> list[BaseException]:
     return [error]
 
 
+def _source_failure(leaf: BaseException) -> toolbox_errors.SourceFailure | None:
+    return toolbox_errors.classify(leaf.message, leaf.data, leaf.code) if isinstance(leaf, MCPError) else None
+
+
+def consent_needed(error: BaseException) -> list[tuple[str, str]]:
+    """(tool source, consent link) pairs from a connection failure."""
+    return [c for leaf in _leaves(error) if (f := _source_failure(leaf)) for c in f.consent]
+
+
 def explain(error: BaseException, http_errors: HttpErrors) -> str:
     """Readable reason for a connection failure, with the HTTP status and body in place of the
-    client's generic 'Server returned an error response'."""
+    client's generic 'Server returned an error response', and tool-source failures without consent links."""
     messages = []
     for leaf in _leaves(error):
         if isinstance(leaf, MCPError) and http_errors.seen and not http_errors.seen[-1].jsonrpc:
             messages.append(str(http_errors.seen[-1]))
+        elif failure := _source_failure(leaf):
+            messages.append(failure.detail)
         else:
             messages.append(f"{type(leaf).__name__}: {leaf}" if str(leaf) else type(leaf).__name__)
     return "; ".join(dict.fromkeys(messages))
@@ -450,7 +480,8 @@ async def run_all(cases: list[dict], target: Target) -> tuple[list[dict], dict]:
         except Exception as e:  # transport failures arrive as (nested) ExceptionGroups
             reason = explain(e, http_errors)
             if not ever_connected:
-                raise SetupError(f"cannot connect to {target.endpoint}: {reason}") from e
+                raise SetupError(f"cannot connect to {target.endpoint}: {reason}", consent_needed(e)) from e
+            toolbox_errors.announce_consent(consent_needed(e), _username(target.scope))
             if not pending:
                 print(f"warning: error closing the MCP session: {reason}", file=sys.stderr)
                 break
@@ -507,6 +538,7 @@ def main(argv: list[str] | None = None) -> int:
         if not cases:
             raise SetupError("no cases found")
         auth.get_token(target.scope)
+        cases = fill_caller(cases, lambda: auth.caller_claims(target.scope))
     except CaseError as e:
         print("invalid cases:\n  " + "\n  ".join(e.problems), file=sys.stderr)
         return 2
@@ -522,6 +554,7 @@ def main(argv: list[str] | None = None) -> int:
         results, info = asyncio.run(run_all(cases, target))
     except SetupError as e:
         print(f"error: {e}", file=sys.stderr)
+        toolbox_errors.announce_consent(e.consent, _username(target.scope))
         return 2
 
     if server := info.get("server"):

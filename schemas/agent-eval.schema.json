@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Foundry agent + toolbox eval turn",
-  "description": "One JSON object per line of a data/agent-evals/*.jsonl file. Turns that share a conversation_id run in turn_number order as one conversation. Validate with scripts/validate_eval_jsonl.py, which also flags settings the pass_criteria ignores, duplicate turns, and turn-number gaps.",
+  "description": "One JSON object per line of a data/agent-evals/*.jsonl file. Turns that share a conversation_id run in turn_number order as one conversation. Strings may use {{caller.oid}}, {{caller.tid}}, {{caller.name}} or {{caller.username}}, filled from the signed-in user's token (regex-escaped in patterns and re: params). Validate with scripts/validate_eval_jsonl.py, which also flags settings the pass_criteria ignores, duplicate turns, turn-number gaps and unknown placeholders.",
   "type": "object",
   "required": ["conversation_id", "turn_number", "user_message", "expected_tool_calls", "pass_criteria", "category"],
   "properties": {

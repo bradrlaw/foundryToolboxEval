@@ -1,3 +1,4 @@
+import contextlib
 import email.message
 import io
 import json
@@ -10,6 +11,8 @@ from unittest import mock
 with mock.patch.dict(os.environ, {"FOUNDRY_PROJECT_ENDPOINT": "https://example.test/api/projects/p/"}), \
         mock.patch("dotenv.load_dotenv"), mock.patch("evals.telemetry.init"):
     from evals.foundry_agent import target
+
+LINK = "https://logic-region-001.consent.azure-apihub.net/login?data=abc"
 
 
 def http_error(code, body="", **headers):
@@ -86,9 +89,49 @@ class RunAgentTests(unittest.TestCase):
         err = target.ResponsesAPIError(400, "An error occurred invoking 'get_customer': not found", 12.0, 2)
         with mock.patch.object(target, "_post_responses", side_effect=err):
             out = target.run_agent([{"role": "user", "content": "hi"}])
-        self.assertTrue(out["platform_abort"])
+            self.assertTrue(target.chat("hi").startswith(target.PLATFORM_ABORT_NOTE))  # the judge sees it
+        self.assertEqual((out["platform_abort"], out["abort_reason"]), (True, "tool_error"))
         self.assertEqual((out["tool_calls"][0]["name"], out["latency_ms"], out["attempts"]), ("get_customer", 12.0, 2))
         self.assertTrue(out["text"].startswith(target.PLATFORM_ABORT_NOTE))
+
+    def test_consent_request_aborts_and_the_link_only_reaches_the_console(self):
+        data = {"status": "completed", "output": [
+            {"type": "mcp_list_tools", "server_label": "sample", "tools": []},
+            {"type": "oauth_consent_request", "id": "oauthreq_1", "consent_link": LINK, "server_label": "sample"},
+        ]}
+        err = io.StringIO()
+        with mock.patch.object(target, "_post_responses", return_value=(data, 30.0, 1)), \
+                mock.patch.object(target.toolbox_errors, "_announced", set()), \
+                mock.patch.object(target, "_username", return_value="ada@example.com"), \
+                contextlib.redirect_stderr(err):
+            out = target.run_agent([{"role": "user", "content": "hi"}])
+            with self.assertRaises(target.AgentNotRun) as ctx:
+                target.chat("hi")
+        self.assertEqual((out["platform_abort"], out["abort_reason"], out["tool_calls"]), (True, "consent_required", []))
+        self.assertEqual(out["text"], f"{target.CONSENT_NOTE} tool source 'sample': user consent required")
+        self.assertNotIn(LINK, out["text"] + str(ctx.exception))
+        self.assertEqual(err.getvalue().count(LINK), 1)
+
+    def test_tool_listing_failure_reports_the_tool_source_error(self):
+        sources = '{"errors":[{"name":"sample","type":"mcp","error":{"code":"%s","message":"%s"}}]}'
+        for code, message, reason, text in (
+            ("HTTP_401", "Authentication failed", "tool_listing_failed",
+             f"{target.LISTING_NOTE} tool source 'sample': HTTP_401: Authentication failed"),
+            ("CONSENT_REQUIRED", LINK, "consent_required",
+             f"{target.CONSENT_NOTE} tool source 'sample': user consent required"),
+        ):
+            body = json.dumps({"error": {"type": "invalid_request_error", "code": "tool_user_error", "message":
+                f"{target.LISTING_FAILED}: Request failed (remote): tools/list failed for 1 tool source(s), succeeded "
+                f"for 0 tool source(s) {sources % (code, message)}. Troubleshooting guide: https://learn.example"}})
+            err = target.ResponsesAPIError(400, body, 20.0, 1)
+            with mock.patch.object(target, "_post_responses", side_effect=err), \
+                    mock.patch.object(target.toolbox_errors, "_announced", set()), \
+                    mock.patch.object(target, "_username", return_value=None), \
+                    contextlib.redirect_stderr(io.StringIO()):
+                out = target.run_agent([{"role": "user", "content": "hi"}])
+                with self.assertRaises(target.AgentNotRun):
+                    target.chat("hi")
+            self.assertEqual((out["abort_reason"], out["text"], out["tool_calls"]), (reason, text, []))
 
     def test_other_api_errors_propagate(self):
         err = target.ResponsesAPIError(401, "denied", 1.0)
@@ -105,7 +148,8 @@ class RunAgentTests(unittest.TestCase):
             out = target.run_agent([{"role": "user", "content": "price?"}])
         self.assertEqual(out["tool_calls"], [{"name": "get_stock_quote", "arguments": {"ticker": "CTSO"},
                                               "output": '{"price": 84.12}'}])
-        self.assertEqual((out["text"], out["latency_ms"], out["platform_abort"]), ("Contoso trades at 84.12.", 50.0, False))
+        self.assertEqual((out["text"], out["latency_ms"], out["platform_abort"], out["abort_reason"]),
+                         ("Contoso trades at 84.12.", 50.0, False, None))
 
 
 if __name__ == "__main__":

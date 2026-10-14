@@ -64,8 +64,23 @@ Run: `.\.venv\Scripts\python scripts\run_assert.py evals\configs\<yours>.yaml`. 
 
 See [telemetry.md](telemetry.md); most projects already have an App Insights connection.
 
+## 6. Toolboxes that pass the user's identity
+
+If a toolbox connection uses OAuth2 identity passthrough, the MCP server sees the user who runs the tests. See
+[entra.md](entra.md) for how this works; in short:
+
+- The runners call as your `az login` user. Write cases for that user's permissions, and check identity with
+  `{{caller.oid}}`, `{{caller.tid}}`, `{{caller.name}}` and `{{caller.username}}` instead of real names, so the files hold
+  no personal data.
+- Each user consents once per connection. Until then, the tool runner exits 2 and agent turns fail with
+  `[AGENT NOT RUN: ...]`; both print the consent link on the console. Open it signed in as the test user, approve and rerun.
+- For each authorization rule, test an allowed and a denied request, and check that denials leak no data.
+- `upstream_error` (tool tests) and `tool_listing_failed` (agent evals) mean the toolbox couldn't authenticate to the server.
+- Users need a project role that can invoke agents (Learn's minimum is **Foundry Agent Consumer**).
+- `UserEntraToken` connections to custom MCP servers failed in our tests; OAuth2 works.
+
 ## Caveats
 
 - A tool returning `isError` during an agent run causes HTTP 400 for the whole request; tool-error handling can only be
   tested at the toolbox level, and agent evals report it as a platform abort.
-- Your toolbox may require auth beyond the Foundry bearer token; direct tool tests use the same token as the agent path.
+- One identity per run: to test another user, sign in as them (and consent once) before running their cases.

@@ -1,8 +1,11 @@
 """Load and validate tool-test and agent-eval JSONL files against the schemas in schemas/.
 
 The JSON Schemas carry the structural rules. Cross-field rules they cannot express clearly are
-checked here: fields a case's kind or pass_criteria ignores, duplicate ids, turn-number gaps, and
-the regex syntax of `re:` params.
+checked here: fields a case's kind or pass_criteria ignores, duplicate ids, turn-number gaps, the
+regex syntax of `re:` params, and unknown {{caller.<field>}} placeholders.
+
+Any string in a case may use {{caller.oid}}, {{caller.tid}}, {{caller.name}} or {{caller.username}}; the
+runners replace them with the signed-in user's values (expand_caller) so per-user cases stay portable.
 """
 from __future__ import annotations
 
@@ -12,7 +15,7 @@ import re
 from collections import defaultdict
 from functools import cache
 from pathlib import Path
-from typing import Iterable
+from typing import Callable, Iterable
 
 from jsonschema import Draft202012Validator
 from jsonschema.exceptions import SchemaError, ValidationError
@@ -35,6 +38,9 @@ ASSERTION_FIELDS = {
     "json_path_exists": {"path"},
     "schema": {"schema"},
 }
+CALLER_FIELDS = ("oid", "tid", "name", "username")
+_CALLER = re.compile(r"\{\{\s*caller\.(\w+)\s*\}\}")
+_AGENT_REGEX_FIELDS = ("expected_response_pattern", "response_must_not_match")
 
 
 class CaseError(ValueError):
@@ -116,6 +122,80 @@ def _agent_problems(case: dict) -> list[str]:
     return problems
 
 
+def _strings(value: object, path: str = "$"):
+    """(JSON path, text) for every string in a case."""
+    if isinstance(value, str):
+        yield path, value
+    elif isinstance(value, dict):
+        for k, v in value.items():
+            yield from _strings(v, f"{path}.{k}")
+    elif isinstance(value, list):
+        for i, v in enumerate(value):
+            yield from _strings(v, f"{path}[{i}]")
+
+
+def _placeholder_problems(case: dict) -> list[str]:
+    return [f"{path}: unknown placeholder {m[0]}; caller fields are {', '.join(CALLER_FIELDS)}"
+            for path, text in _strings(case) for m in _CALLER.finditer(text) if m[1] not in CALLER_FIELDS]
+
+
+def caller_fields(cases: Iterable[dict]) -> set[str]:
+    """Fields named by {{caller.<field>}} placeholders in the cases."""
+    return {m[1] for case in cases for _, text in _strings(case) for m in _CALLER.finditer(text)}
+
+
+def _fill(text: str, caller: dict[str, str], regex: bool = False) -> str:
+    return _CALLER.sub(lambda m: re.escape(caller[m[1]]) if regex else caller[m[1]], text)
+
+
+def _fill_all(value: object, caller: dict[str, str]) -> object:
+    if isinstance(value, str):
+        return _fill(value, caller)
+    if isinstance(value, dict):
+        return {k: _fill_all(v, caller) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_fill_all(v, caller) for v in value]
+    return value
+
+
+def expand_caller(cases: list[dict], caller: dict[str, str]) -> list[dict]:
+    """Copies of `cases` with {{caller.<field>}} replaced by `caller` values, regex-escaped in regex fields
+    (regex assertion patterns, expected_response_pattern, response_must_not_match, re: params).
+
+    Raises KeyError for a field `caller` lacks; check caller_fields first.
+    """
+    out = []
+    for case in cases:
+        new = _fill_all(case, caller)
+        for key in _AGENT_REGEX_FIELDS:
+            if isinstance(case.get(key), str):
+                new[key] = _fill(case[key], caller, regex=True)
+        for call, new_call in zip(case.get("expected_tool_calls", []), new.get("expected_tool_calls", [])):
+            for key, value in call.get("params", {}).items():
+                if isinstance(value, str) and value.startswith("re:"):
+                    new_call["params"][key] = _fill(value, caller, regex=True)
+        for a, new_a in zip(case.get("assertions", []), new.get("assertions", [])):
+            if a.get("type") == "regex" and isinstance(a.get("pattern"), str):
+                new_a["pattern"] = _fill(a["pattern"], caller, regex=True)
+        out.append(new)
+    return out
+
+
+def fill_caller(cases: list[dict], get_caller: Callable[[], dict[str, str]]) -> list[dict]:
+    """expand_caller with the signed-in user's claims, fetched only when some case has a placeholder.
+
+    Raises CaseError naming each placeholder the claims cannot fill.
+    """
+    fields = caller_fields(cases)
+    if not fields:
+        return cases
+    caller = get_caller()
+    missing = sorted(fields - caller.keys())
+    if missing:
+        raise CaseError([f"{{{{caller.{f}}}}}: no matching claim in the signed-in user's token" for f in missing])
+    return expand_caller(cases, caller)
+
+
 def _identity(kind: str, case: object) -> tuple[str, object] | None:
     """(label, key) for duplicate and turn-order checks; None if the identity fields are malformed.
 
@@ -170,7 +250,8 @@ def check_files(paths: Iterable[Path | str], kind: str | None = None) -> tuple[d
             errors = sorted(validator.iter_errors(case), key=lambda e: e.json_path)
             problems += [f"{where}: {format_error(e)}" for e in errors]
             if not errors:
-                problems += [f"{where}: {p}" for p in (_tool_problems if file_kind == "tool" else _agent_problems)(case)]
+                kind_problems = (_tool_problems if file_kind == "tool" else _agent_problems)(case)
+                problems += [f"{where}: {p}" for p in kind_problems + _placeholder_problems(case)]
                 cases[file_kind].append(case)
             identity = _identity(file_kind, case)
             if identity is None:

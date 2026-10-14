@@ -29,6 +29,10 @@ Checks: expected tool calls (+ param matching), `must_not_call`, response regex 
   calls + params, ordered, `must_not_call`, response regex, latency; multi-turn by `conversation_id`). ASSERT does not
   assert specific call parameters, so the two complement each other.
 - Reports (`scripts/report.py`, baseline diffs) and App Insights telemetry (`docs/telemetry.md`): done.
+- Per-user Entra identity: done ([entra.md](entra.md)). An Entra-protected sample server (`AUTH_MODE=entra`, region
+  filtering by app role) behind an OAuth2 identity-passthrough connection; `{{caller.*}}` placeholders; the tool-test
+  outcomes `consent_required` and `upstream_error`; and agent abort reasons for turns the agent never ran. `UserEntraToken`
+  doesn't work for custom MCP servers: Foundry's token exchange rejects custom audiences.
 
 ## Data format (JSONL, one case per line)
 
@@ -51,6 +55,8 @@ Checks: expected tool calls (+ param matching), `must_not_call`, response regex 
 - Python, no Foundry SDK: `azure-ai-projects` conflicts with assert-ai's `openai` pin, so the agent target calls REST directly.
 - Deterministic checks plus ASSERT as the LLM judge.
 - Results are local JSON files (`results/`); spans optionally go to Application Insights.
+- Per-user identity uses OAuth2 identity-passthrough connections. Runs use the `az login` user, cases name no real user
+  (`{{caller.*}}` placeholders), and consent links are printed to the console only, because they act like bearer secrets.
 
 ## Next
 
@@ -59,3 +65,6 @@ Checks: expected tool calls (+ param matching), `must_not_call`, response regex 
 - Multi-turn fidelity (`previous_response_id` or Foundry conversations instead of text replay) and per-run provenance
   (agent version, model, toolbox version, token usage).
 - CI workflow; Foundry cloud evaluation as a server-side alternative.
+- Identity: several test identities in one run (a role matrix, each case tagged with the identity it expects); hosted
+  agents, which forward `x-agent-foundry-call-id` to the toolbox; recheck `UserEntraToken` for custom audiences; confirm
+  consent survives the connection's refresh-token expiry.

@@ -46,10 +46,11 @@ az acr build -r <uniqueacrname> -t sample-mcp:v1 sample-mcp-server
 az containerapp env create -n sample-env -g rg-toolbox-eval-sample -l <region>
 az containerapp create -n sample-mcp -g rg-toolbox-eval-sample --environment sample-env `
   --image <uniqueacrname>.azurecr.io/sample-mcp:v1 --registry-server <uniqueacrname>.azurecr.io `
-  --target-port 8000 --ingress external
+  --target-port 8000 --ingress external --min-replicas 1
 ```
 
-The MCP URL is `https://<app-fqdn>/mcp`. It is unauthenticated, so use only synthetic data.
+The MCP URL is `https://<app-fqdn>/mcp`. It is unauthenticated, so use only synthetic data. `--min-replicas 1` keeps one
+replica running, so latency checks don't measure cold starts; leave it out to let the app scale to zero between runs.
 
 ## 4. Create the connection and toolbox
 
@@ -110,6 +111,14 @@ Both runners exit 0 when everything passes, 1 when a case fails, and 2 on invali
 
 Add telemetry with [telemetry.md](telemetry.md).
 
+## 7. Optional: per-user Entra identity
+
+The sample can also run as an Entra-protected MCP server that sees each user's identity and filters customers by app role.
+It deploys beside the stack above: a second Container App (`AUTH_MODE=entra`), an OAuth2 identity-passthrough connection
+and toolbox, and the agent `customer-assistant-oauth`. Follow [entra.md](entra.md#4-set-it-up); it needs a directory role
+that can register apps and grant admin consent. The first run prints a one-time consent link; after you consent, expect
+`sample-toolbox-entra.jsonl` tool tests 11/11 and agent evals 6/6.
+
 ## Troubleshooting
 
 | Symptom | Fix |
@@ -118,6 +127,8 @@ Add telemetry with [telemetry.md](telemetry.md).
 | `FOUNDRY_PROJECT_ENDPOINT` missing | Set it in `.env` |
 | Runner exits with `invalid cases:` | Fix the listed lines; `scripts\validate_eval_jsonl.py` runs the same checks |
 | Agent run returns HTTP 400 `An error occurred invoking 'sample___...'` | Platform behavior: any tool error aborts the whole agent request. The runners record it as `[AGENT FAILURE]` / `platform_abort` |
+| Runner exits 2 with `user consent required`, or turns fail with `[AGENT NOT RUN: ...]` | An OAuth2 connection needs your one-time consent. Open the link printed on the console while signed in as the test user, approve, rerun ([entra.md](entra.md#5-consent)) |
+| `upstream_error` or `tool_listing_failed` | The toolbox couldn't reach or authenticate to the MCP server; the failure text names the tool source and code, such as `HTTP_401` ([entra.md](entra.md#10-troubleshooting)) |
 | Intermittent DNS / connection errors | Transient; the runners retry. Rerun failed ASSERT stages, completed stages are cached |
 | ASSERT writes into site-packages | Run configs through `scripts\run_assert.py`, which sets an absolute `artifacts_root` |
 | ASSERT judge output truncated | Keep `max_tokens: 24000` for the judge |

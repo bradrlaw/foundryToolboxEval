@@ -1,3 +1,5 @@
+import base64
+import json
 import time
 import unittest
 from unittest import mock
@@ -53,6 +55,25 @@ class TokenCacheTests(unittest.TestCase):
         with self.assertRaises(ClientAuthenticationError):
             auth.get_token("s")
         self.assertEqual(cred.calls, 1)
+
+
+def jwt(**claims):
+    payload = base64.urlsafe_b64encode(json.dumps(claims).encode()).decode().rstrip("=")
+    return f"e30.{payload}.sig"
+
+
+class CallerClaimsTests(unittest.TestCase):
+    def test_identity_claims_from_the_token(self):
+        token = jwt(oid="o-1", tid="t-1", name="Ada", upn="ada@example.com", unique_name="other", aud="x")
+        with mock.patch.object(auth, "get_token", return_value=token) as get:
+            self.assertEqual(auth.caller_claims("scope"),
+                             {"oid": "o-1", "tid": "t-1", "name": "Ada", "username": "ada@example.com"})
+        get.assert_called_once_with("scope")
+
+    def test_username_prefers_preferred_username_and_missing_claims_are_omitted(self):
+        token = jwt(oid="o-1", preferred_username="p@example.com", upn="u@example.com")
+        with mock.patch.object(auth, "get_token", return_value=token):
+            self.assertEqual(auth.caller_claims(), {"oid": "o-1", "username": "p@example.com"})
 
 
 if __name__ == "__main__":

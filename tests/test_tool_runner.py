@@ -2,7 +2,9 @@ import argparse
 import asyncio
 import contextlib
 import io
+import json
 import os
+import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -15,6 +17,9 @@ from mcp.types import CONNECTION_CLOSED, INTERNAL_ERROR, INVALID_PARAMS, REQUEST
 from tooltests import run
 
 TARGET = run.Target("https://toolbox.example/mcp")
+LINK = "https://logic-region-001.consent.azure-apihub.net/login?data=abc"
+CONSENT_LIST_ERROR = ('tools/list failed for 1 tool source(s), succeeded for 0 tool source(s) {"errors":[{"name":"sample",'
+                      '"type":"mcp","error":{"code":"CONSENT_REQUIRED","message":"%s"}}]}' % LINK)
 
 
 def case(case_id="c1", **kw):
@@ -77,6 +82,18 @@ class ClassificationTests(NoTokenTestCase):
 
     def test_output_schema_violations_are_invalid_results(self):
         self.assertEqual(self.classify(RuntimeError("Invalid structured content")).outcome, "invalid_result")
+
+    def test_tool_source_failures(self):
+        err = io.StringIO()
+        with mock.patch.object(run.toolbox_errors, "_announced", set()), contextlib.redirect_stderr(err), \
+                mock.patch.object(run.auth, "caller_claims", return_value={"username": "ada@example.com"}):
+            o = self.classify(MCPError(-32006, LINK, {"grpcStatus": "FailedPrecondition", "detail": LINK}))
+        self.assertEqual(o.outcome, "consent_required")
+        self.assertNotIn(LINK, o.text)
+        self.assertIn(f"signed in as ada@example.com, approve, then rerun:\n  {LINK}", err.getvalue())
+        o = self.classify(MCPError(-32002, "Authentication failed when connecting to the MCP server: x",
+                                   {"grpcStatus": "Unauthenticated"}))
+        self.assertEqual(o.outcome, "upstream_error")
 
 
 class HttpErrorHookTests(unittest.TestCase):
@@ -147,11 +164,13 @@ class RunAllTests(NoTokenTestCase):
         self.addCleanup(patcher.stop)
         self.connects = 0
 
-    def run_all(self, cases, run_case, connect_failures=()):
+    def run_all(self, cases, run_case, connect_failures=(), connect_error=None):
         @contextlib.asynccontextmanager
         async def fake_connect(target, http_errors):
             self.connects += 1
             if self.connects in connect_failures:
+                if connect_error:
+                    raise connect_error
                 http_errors.seen.append(run.HttpError(401, "denied", jsonrpc=False))
                 raise ExceptionGroup("tg", [MCPError(INTERNAL_ERROR, "Server returned an error response")])
             yield FakeToolbox()
@@ -205,6 +224,55 @@ class RunAllTests(NoTokenTestCase):
         with self.assertRaises(run.SetupError) as ctx:
             self.run_all([case()], run_case, connect_failures={1})
         self.assertIn("HTTP 401: denied", str(ctx.exception))
+
+    def test_consent_needed_at_connect_is_a_setup_error_that_carries_the_link_separately(self):
+        async def run_case(tb, c):
+            raise AssertionError("not reached")
+
+        error = ExceptionGroup("tg", [MCPError(-32006, CONSENT_LIST_ERROR)])
+        with self.assertRaises(run.SetupError) as ctx:
+            self.run_all([case()], run_case, connect_failures={1}, connect_error=error)
+        self.assertTrue(str(ctx.exception).endswith(": tool source 'sample': user consent required"))
+        self.assertNotIn(LINK, str(ctx.exception))
+        self.assertEqual(ctx.exception.consent, [("sample", LINK)])
+
+
+class MainTests(NoTokenTestCase):
+    def main(self, cases, run_all, claims=None):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "cases.jsonl"
+            path.write_text("\n".join(json.dumps(c) for c in cases), encoding="utf-8")
+            out, err = io.StringIO(), io.StringIO()
+            with mock.patch.object(run, "load_dotenv"), mock.patch.object(run.telemetry, "init"), \
+                    mock.patch.object(run, "run_all", run_all), \
+                    mock.patch.object(run.auth, "caller_claims", return_value=claims or {}), \
+                    mock.patch.object(run.toolbox_errors, "_announced", set()), \
+                    contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                code = run.main([str(path), "--endpoint", TARGET.endpoint, "--out", tmp])
+        return code, out.getvalue(), err.getvalue()
+
+    def test_consent_needed_at_connect_exits_2_and_prints_the_link_after_the_error(self):
+        async def run_all(cases, target):
+            raise run.SetupError("cannot connect: tool source 'sample': user consent required", [("sample", LINK)])
+
+        code, _, err = self.main([case()], run_all)
+        self.assertEqual(code, 2)
+        self.assertLess(err.index("error: cannot connect"), err.index(LINK))
+
+    def test_caller_placeholders_are_filled_before_the_run(self):
+        seen = []
+
+        async def run_all(cases, target):
+            seen.extend(cases)
+            return [], {}
+
+        assertion = {"type": "json_path_equals", "path": "$.oid", "value": "{{caller.oid}}"}
+        code, _, _ = self.main([case(assertions=[assertion])], run_all, claims={"oid": "o-1"})
+        self.assertEqual((code, seen[0]["assertions"][0]["value"]), (0, "o-1"))
+
+        code, _, err = self.main([case(arguments={"id": "{{caller.oid}}"})], run_all)
+        self.assertEqual(code, 2)
+        self.assertIn("{{caller.oid}}: no matching claim", err)
 
 
 class ExplainTests(unittest.TestCase):

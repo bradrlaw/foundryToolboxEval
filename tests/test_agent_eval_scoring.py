@@ -1,10 +1,18 @@
 import contextlib
 import io
+import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from evals.run_agent_evals import main, run_conversations, score_turn
+
+# main imports the target, which reads its settings at import time.
+with mock.patch.dict(os.environ, {"FOUNDRY_PROJECT_ENDPOINT": "https://example.test/api/projects/p/"}), \
+        mock.patch("dotenv.load_dotenv"), mock.patch("evals.telemetry.init"):
+    from evals.foundry_agent import target
 
 
 def res(calls, text="", latency=100.0, abort=False):
@@ -62,6 +70,14 @@ class ScoreTurnTests(unittest.TestCase):
     def test_platform_abort_matches_on_name_only(self):
         c = case(expected_tool_calls=[{"tool": "t", "params": {"id": "C1"}}])
         self.assertEqual(score_turn(c, res([{"name": "t", "arguments": None, "output": ""}])), [])
+
+    def test_a_turn_the_agent_never_ran_fails_with_the_reason(self):
+        # Without the early exit this case would pass vacuously: no forbidden call, no forbidden text.
+        c = case(pass_criteria="response_matches", expected_response_pattern=".*", must_not_call=["t"],
+                 response_must_not_match="secret")
+        for reason in ("consent_required", "tool_listing_failed"):
+            r = {**res([], text=f"[AGENT NOT RUN: {reason}]", abort=True), "abort_reason": reason}
+            self.assertEqual(score_turn(c, r), [f"[AGENT NOT RUN: {reason}]"])
 
 
 class ConversationTests(unittest.TestCase):
@@ -124,6 +140,29 @@ class MainTests(unittest.TestCase):
             with contextlib.redirect_stderr(err):
                 self.assertEqual(main([str(path)]), 2)
         self.assertIn("'turn_number' is a required property", err.getvalue())
+
+    def test_agent_flag_and_caller_placeholders(self):
+        seen = {}
+
+        def fake_run(cases, agent):
+            seen.update(cases=cases, agent=target.AGENT_NAME)
+            return [{"conversation_id": "x", "turn_number": 1, "category": "c", "passed": True, "failures": [],
+                     "platform_abort": False, "abort_reason": None, "history_gap": False, "latency_ms": 1.0}]
+
+        line = {"conversation_id": "x", "turn_number": 1, "user_message": "Who am I?", "expected_tool_calls": [],
+                "pass_criteria": "response_matches", "expected_response_pattern": "{{caller.name}}", "category": "c"}
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(target, "AGENT_NAME", "default-agent"), \
+                mock.patch("evals.run_agent_evals.load_dotenv"), mock.patch("evals.telemetry.init"), \
+                mock.patch("evals.auth.get_token", return_value="tok"), \
+                mock.patch("evals.auth.caller_claims", return_value={"name": "Ada (Admin)"}), \
+                mock.patch("evals.run_agent_evals.run_conversations", side_effect=fake_run), \
+                contextlib.redirect_stdout(io.StringIO()):
+            path = Path(tmp) / "cases.jsonl"
+            path.write_text(json.dumps(line), encoding="utf-8")
+            self.assertEqual(main([str(path), "--agent", "my-agent", "--out", tmp]), 0)
+            saved = json.loads(next(Path(tmp).glob("run-*.json")).read_text(encoding="utf-8"))
+        self.assertEqual((seen["agent"], saved["agent"]), ("my-agent", "my-agent"))
+        self.assertEqual(seen["cases"][0]["expected_response_pattern"], "Ada\\ \\(Admin\\)")
 
 
 if __name__ == "__main__":

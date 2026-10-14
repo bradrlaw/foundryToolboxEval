@@ -5,6 +5,8 @@ it expires instead of being fetched for every request.
 """
 from __future__ import annotations
 
+import base64
+import json
 import threading
 import time
 
@@ -42,3 +44,16 @@ def get_token(scope: str = FOUNDRY_SCOPE) -> str:
                 time.sleep(2 * (attempt + 1))
         _cache[scope] = (tok.token, tok.expires_on)
         return tok.token
+
+
+def caller_claims(scope: str = FOUNDRY_SCOPE) -> dict[str, str]:
+    """The signed-in user's oid, tid, name and username (preferred_username, else upn, else unique_name)
+    from the token for `scope`. Claims the token lacks are left out; the signature is not checked."""
+    payload = get_token(scope).split(".")[1]
+    claims = json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
+    out = {k: claims[k] for k in ("oid", "tid", "name") if isinstance(claims.get(k), str)}
+    for k in ("preferred_username", "upn", "unique_name"):
+        if isinstance(claims.get(k), str):
+            out["username"] = claims[k]
+            break
+    return out

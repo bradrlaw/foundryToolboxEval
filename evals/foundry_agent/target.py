@@ -18,7 +18,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 from opentelemetry import trace
 
-from evals import auth, telemetry
+from evals import auth, telemetry, toolbox_errors
 
 # Environment-specific values live in the git-ignored .env at the repo root.
 load_dotenv(Path(__file__).resolve().parents[2] / ".env")
@@ -109,14 +109,51 @@ def _tool_output_text(item: dict) -> str:
 
 
 PLATFORM_ABORT_NOTE = "[AGENT FAILURE: the platform aborted the request because a tool returned an error]"
+CONSENT_NOTE = "[AGENT NOT RUN: the signed-in user has not consented to the agent's OAuth tool connection]"
+LISTING_NOTE = "[AGENT NOT RUN: the toolbox could not list the agent's tools]"
+LISTING_FAILED = "McpProtocolException encountered while enumerating tools"
+
+
+class AgentNotRun(RuntimeError):
+    """The agent could not run (consent missing or its tools could not be listed): nothing to judge."""
+
+
+def _api_error_message(body: str) -> str:
+    try:
+        message = json.loads(body)["error"]["message"]
+    except (ValueError, KeyError, TypeError):
+        return body
+    return message if isinstance(message, str) else body
+
+
+def _username() -> str | None:
+    try:  # only used to word a console hint
+        return auth.caller_claims().get("username")
+    except Exception:
+        return None
+
+
+def _aborted(span, text: str, reason: str, calls: list, latency_ms: float, attempts: int) -> dict:
+    span.set_attribute("eval.platform_abort", True)
+    span.set_attribute("eval.abort_reason", reason)
+    span.set_attribute("output.value", text)
+    return {"text": text, "platform_abort": True, "abort_reason": reason, "tool_calls": calls,
+            "latency_ms": latency_ms, "attempts": attempts}
 
 
 def run_agent(messages: list[dict[str, str]]) -> dict:
-    """Call the agent once. Returns text, tool_calls [{name, arguments, output}], latency_ms, attempts and
-    platform_abort. latency_ms covers the final HTTP attempt only (no token fetch or retry waits).
+    """Call the agent once. Returns text, tool_calls [{name, arguments, output}], latency_ms, attempts,
+    platform_abort and abort_reason. latency_ms covers the final HTTP attempt only (no token fetch or
+    retry waits).
 
-    Finding: a toolbox tool error fails the whole Responses call with HTTP 400, so the model never sees
-    it. That is reported as platform_abort=True with the tool name recovered from the error message.
+    Findings, reported as platform_abort=True with an abort_reason:
+    - tool_error: a toolbox tool error fails the whole Responses call with HTTP 400, so the model never
+      sees it. The tool name is recovered from the error message.
+    - consent_required: a tool source uses OAuth identity passthrough and the signed-in user has not
+      consented. The response completes with an oauth_consent_request item instead of a reply; the
+      consent link goes to the console only.
+    - tool_listing_failed: the toolbox could not list a tool source's tools (HTTP 400), e.g. the MCP
+      server rejected the user's token.
     """
     with _tracer.start_as_current_span("foundry_agent") as span:
         span.set_attribute("openinference.span.kind", "AGENT")
@@ -131,16 +168,20 @@ def run_agent(messages: list[dict[str, str]]) -> dict:
         except ResponsesAPIError as e:
             if e.status == 400 and "An error occurred invoking" in e.body:
                 m = re.search(r"invoking '([^']+)'", e.body)
-                text = f"{PLATFORM_ABORT_NOTE} {e}"
-                span.set_attribute("eval.platform_abort", True)
-                span.set_attribute("output.value", text)
-                return {
-                    "text": text, "platform_abort": True, "attempts": e.attempts, "latency_ms": e.latency_ms,
-                    "tool_calls": [{"name": m.group(1) if m else "", "arguments": None, "output": str(e)}],
-                }
+                calls = [{"name": m.group(1) if m else "", "arguments": None, "output": str(e)}]
+                return _aborted(span, f"{PLATFORM_ABORT_NOTE} {e}", "tool_error", calls, e.latency_ms, e.attempts)
+            if e.status == 400 and LISTING_FAILED in e.body:
+                message = _api_error_message(e.body)
+                failure = toolbox_errors.classify(message)
+                if failure and failure.consent:
+                    toolbox_errors.announce_consent(failure.consent, _username())
+                    return _aborted(span, f"{CONSENT_NOTE} {failure.detail}", "consent_required", [],
+                                    e.latency_ms, e.attempts)
+                detail = failure.detail if failure else message
+                return _aborted(span, f"{LISTING_NOTE} {detail}", "tool_listing_failed", [], e.latency_ms, e.attempts)
             raise
 
-        text, calls = "", []
+        text, calls, consent = "", [], []
         for item in data.get("output", []):
             if item.get("type") == "mcp_call":
                 out = _tool_output_text(item)
@@ -154,21 +195,32 @@ def run_agent(messages: list[dict[str, str]]) -> dict:
                     tool.set_attribute("output.value", out)
             elif item.get("type") == "message":
                 text += "".join(c.get("text", "") for c in item.get("content", []))
+            elif item.get("type") == "oauth_consent_request":
+                consent.append((str(item.get("server_label") or ""), str(item.get("consent_link") or "")))
 
+        if consent:
+            toolbox_errors.announce_consent(consent, _username())
+            detail = "; ".join(f"tool source '{s}': {toolbox_errors.CONSENT_DETAIL}" for s, _ in consent)
+            return _aborted(span, f"{CONSENT_NOTE} {detail}", "consent_required", calls, latency_ms, attempts)
         if data.get("status") != "completed":
             raise RuntimeError(f"Agent response status {data.get('status')}: {data.get('error')}")
         span.set_attribute("output.value", text)
-        return {"text": text, "platform_abort": False, "tool_calls": calls,
+        return {"text": text, "platform_abort": False, "abort_reason": None, "tool_calls": calls,
                 "latency_ms": latency_ms, "attempts": attempts}
 
 
 def chat(message: str, history: list[dict[str, str]] | None = None) -> str:
+    """ASSERT entry point. Raises AgentNotRun when the agent could not run, which ASSERT records as a
+    target_error and leaves unscored; a tool_error abort returns its note for the judge to see."""
     messages = [
         {"role": t["role"], "content": str(t.get("content") or "")}
         for t in (history or [])
         if t.get("role") in ("user", "assistant")
     ] or [{"role": "user", "content": message}]
-    return run_agent(messages)["text"]
+    out = run_agent(messages)
+    if out["abort_reason"] in toolbox_errors.AGENT_NOT_RUN:
+        raise AgentNotRun(out["text"])
+    return out["text"]
 
 
 if __name__ == "__main__":

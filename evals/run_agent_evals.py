@@ -2,8 +2,14 @@
 
 Complements ASSERT, which judges behavior but does not check exact tool calls or parameters.
 
-Usage: python -m evals.run_agent_evals data/agent-evals/sample-toolbox.jsonl
+Usage:
+  python -m evals.run_agent_evals data/agent-evals/sample-toolbox.jsonl
+  python -m evals.run_agent_evals data/agent-evals/sample-toolbox-entra.jsonl --agent customer-assistant-oauth
 Results are written to results/agent-evals/run-<UTC timestamp>.json.
+
+Cases may use {{caller.oid}}, {{caller.tid}}, {{caller.name}} and {{caller.username}}, filled from the
+signed-in user's token. A turn the agent could not run at all (consent_required, tool_listing_failed)
+fails with that reason; consent links are printed to the console only, never saved.
 
 Exit codes: 0 all turns passed, 1 some failed, 2 setup error (invalid cases, missing endpoint or sign-in).
 """
@@ -20,7 +26,8 @@ from azure.core.exceptions import ClientAuthenticationError
 from dotenv import load_dotenv
 
 from evals import auth, telemetry
-from evals.cases import ROOT, CaseError, load_cases
+from evals.cases import ROOT, CaseError, fill_caller, load_cases
+from evals.toolbox_errors import AGENT_NOT_RUN
 
 
 def _value_matches(expected, actual) -> bool:
@@ -42,6 +49,8 @@ def _call_matches(expected: dict, actual: dict) -> bool:
 
 def score_turn(case: dict, result: dict) -> list[str]:
     """Return a list of failure reasons (empty = pass)."""
+    if result.get("abort_reason") in AGENT_NOT_RUN:
+        return [result["text"]]  # nothing to score; must_not_call and must-not-match checks would pass vacuously
     calls = result["tool_calls"]
     criteria = case["pass_criteria"]
     failures: list[str] = []
@@ -102,7 +111,8 @@ def run_conversations(cases: list[dict], agent) -> list[dict]:
             results.append({
                 "conversation_id": conv_id, "turn_number": case["turn_number"], "category": case["category"],
                 "passed": not failures, "failures": failures,
-                "platform_abort": bool(res and res["platform_abort"]), "history_gap": gap,
+                "platform_abort": bool(res and res["platform_abort"]),
+                "abort_reason": res.get("abort_reason") if res else None, "history_gap": gap,
                 "latency_ms": round(res["latency_ms"], 1) if res else None,
                 "attempts": res.get("attempts") if res else None,
                 "tool_calls": [{"name": c["name"], "arguments": c["arguments"]} for c in res["tool_calls"]] if res else [],
@@ -122,6 +132,7 @@ def _fmt_ms(ms: float | None) -> str:
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="Run agent-eval conversations against the Foundry agent and score its tool calls.")
     ap.add_argument("cases", nargs="+", help="agent-eval JSONL files or glob patterns")
+    ap.add_argument("--agent", help="agent name (default: $FOUNDRY_AGENT_NAME, else customer-assistant)")
     ap.add_argument("--out", type=Path, default=ROOT / "results" / "agent-evals")
     args = ap.parse_args(argv)
 
@@ -139,22 +150,35 @@ def main(argv: list[str] | None = None) -> int:
     try:
         from evals.foundry_agent import target  # reads FOUNDRY_PROJECT_ENDPOINT at import
         auth.get_token()
+        cases = fill_caller(cases, auth.caller_claims)
+    except CaseError as e:
+        print("invalid cases:\n  " + "\n  ".join(e.problems), file=sys.stderr)
+        return 2
     except RuntimeError as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
     except ClientAuthenticationError as e:
         print(f"error: cannot get a token for {auth.FOUNDRY_SCOPE} (signed in with az login?): {e}", file=sys.stderr)
         return 2
+    if args.agent:
+        target.AGENT_NAME = args.agent
 
     results = run_conversations(cases, target.run_agent)
     for r in results:
-        flags = "".join(f" [{name.replace('_', ' ')}]" for name in ("platform_abort", "history_gap") if r[name])
+        flags = ""
+        if r["platform_abort"]:
+            flags += f" [platform abort: {r['abort_reason']}]" if r["abort_reason"] else " [platform abort]"
+        if r["history_gap"]:
+            flags += " [history gap]"
         print(f"{'PASS' if r['passed'] else 'FAIL'} {r['conversation_id']}#{r['turn_number']} {r['category']}{flags} "
               f"{_fmt_ms(r['latency_ms'])}")
         for f in r["failures"]:
             print(f"       - {f}")
     passed = sum(r["passed"] for r in results)
     print(f"\n{passed}/{len(results)} passed")
+    if any(r["abort_reason"] == "consent_required" for r in results):
+        print("Some turns did not run: the agent's OAuth tool connection needs the signed-in user's consent. "
+              "Open the link printed above, approve, then rerun.", file=sys.stderr)
 
     args.out.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")

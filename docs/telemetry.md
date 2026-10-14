@@ -33,14 +33,19 @@ Run the runners with the venv python (it has `azure-monitor-opentelemetry-export
 | --- | --- |
 | `foundry-toolbox-tests` | `toolbox.test_case` (`eval.case_id`, `eval.kind`, `eval.category`, `gen_ai.tool.name`, `eval.passed`, `eval.outcome`, `eval.latency_p50_ms`, `eval.failures`) |
 | `foundry-agent-evals` | `eval.turn` (`eval.conversation_id`, `eval.turn_number`, `eval.category`, `eval.passed`, `eval.failures`), with the target's `foundry_agent` and `tool:*` spans as children |
-| `foundry-agent-target` | `foundry_agent` (`gen_ai.agent.name`, `eval.platform_abort`) and `tool:*` (`gen_ai.tool.name`), when ASSERT runs the target or it runs on its own |
+| `foundry-agent-target` | `foundry_agent` (`gen_ai.agent.name`, `eval.platform_abort`, `eval.abort_reason`) and `tool:*` (`gen_ai.tool.name`), when ASSERT runs the target or it runs on its own |
 | `responsesapi` (Foundry) | `invoke_agent`, `chat <model>`, `execute_tool` with real tool durations |
 
 A process has one cloud role, set by the first module to install the tracer provider. Under `run_agent_evals` that is the
 runner, so the target's spans carry `foundry-agent-evals`.
 
-`eval.outcome` lists the outcomes seen across a case's runs (`ok`, `tool_error`, `protocol_error`, `invalid_result`,
-`transport_error`, `runner_error`), comma-separated.
+`eval.outcome` lists the outcomes seen across a case's runs (`ok`, `tool_error`, `protocol_error`, `consent_required`,
+`upstream_error`, `invalid_result`, `transport_error`, `runner_error`), comma-separated. `eval.abort_reason` is
+`tool_error`, `consent_required` or `tool_listing_failed` when `eval.platform_abort` is true
+([entra.md](entra.md#failures-specific-to-identity)).
+
+Consent links never appear in spans. Identity cases can put the test user's object ID, name or username into span
+attributes: agent replies in `output.value`, and failure messages with filled-in `{{caller.*}}` values in `eval.failures`.
 
 The target injects a W3C `traceparent` into the Responses call, so server spans share the `operation_Id` of the eval turn
 and you can see one trace from eval turn to model and tool calls. Tool spans created by the target are zero-duration
@@ -62,6 +67,10 @@ dependencies | where name == "toolbox.test_case"
 // tool latency from Foundry's server-side spans
 dependencies | where cloud_RoleName == "responsesapi" and name startswith "execute_tool"
 | summarize p50=percentile(duration,50), p95=percentile(duration,95), n=count() by name
+
+// agent requests that aborted or never ran, by reason
+dependencies | where name == "foundry_agent" and tostring(customDimensions["eval.platform_abort"]) =~ "true"
+| summarize n=count() by reason=tostring(customDimensions["eval.abort_reason"]), bin(timestamp, 1d)
 
 // full trace for one eval turn
 dependencies | where operation_Id == "<id>" | project timestamp, cloud_RoleName, name, duration | order by timestamp asc

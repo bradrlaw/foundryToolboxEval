@@ -2,8 +2,10 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
-from evals.cases import ROOT, CaseError, check_files, detect_kind, expand_paths, load_cases
+from evals.cases import (ROOT, CaseError, caller_fields, check_files, detect_kind, expand_caller, expand_paths,
+                         fill_caller, load_cases)
 
 
 def problems_for(kind: str, *records: dict) -> list[str]:
@@ -102,6 +104,48 @@ class AgentCaseTests(unittest.TestCase):
             with self.assertRaises(CaseError) as ctx:
                 load_cases([path], "agent")
             self.assertEqual(len(ctx.exception.problems), 1)
+
+
+class PlaceholderTests(unittest.TestCase):
+    def test_unknown_fields_are_flagged(self):
+        problems = problems_for("tool", call(arguments={"id": "{{caller.email}}"}))
+        self.assertEqual(len(problems), 1)
+        self.assertIn("$.arguments.id: unknown placeholder {{caller.email}}", problems[0])
+        self.assertEqual(problems_for("agent", turn(user_message="I am {{ caller.name }}")), [])
+
+    def test_regex_fields_get_escaped_values_and_others_plain(self):
+        caller = {"name": "Ada (Admin)", "oid": "o-1"}
+        tool_case = call(arguments={"q": "{{caller.name}}"}, assertions=[
+            {"type": "regex", "pattern": '"name":\\s*"{{caller.name}}"'},
+            {"type": "json_path_equals", "path": "$.oid", "value": "{{caller.oid}}"},
+            {"type": "schema", "schema": {"properties": {"name": {"const": "{{caller.name}}"}}}},
+        ])
+        agent_case = turn(user_message="hi {{caller.name}}", pass_criteria="both",
+                          expected_response_pattern="{{caller.name}}", response_must_not_match="not {{caller.oid}}",
+                          expected_tool_calls=[{"tool": "t", "params": {"a": "re:^{{caller.name}}$", "b": "{{caller.name}}"}}])
+        self.assertEqual(caller_fields([tool_case, agent_case]), {"name", "oid"})
+        t, a = expand_caller([tool_case, agent_case], caller)
+        self.assertEqual(t["arguments"], {"q": "Ada (Admin)"})
+        self.assertEqual(t["assertions"][0]["pattern"], '"name":\\s*"Ada\\ \\(Admin\\)"')
+        self.assertEqual(t["assertions"][1]["value"], "o-1")
+        self.assertEqual(t["assertions"][2]["schema"]["properties"]["name"]["const"], "Ada (Admin)")
+        self.assertEqual((a["user_message"], a["expected_response_pattern"], a["response_must_not_match"]),
+                         ("hi Ada (Admin)", "Ada\\ \\(Admin\\)", "not o\\-1"))
+        self.assertEqual(a["expected_tool_calls"][0]["params"], {"a": "re:^Ada\\ \\(Admin\\)$", "b": "Ada (Admin)"})
+        self.assertEqual(tool_case["arguments"], {"q": "{{caller.name}}"})  # the originals are untouched
+
+    def test_fill_caller_reads_claims_only_when_needed(self):
+        get = mock.Mock(return_value={"oid": "o-1"})
+        plain = [call()]
+        self.assertIs(fill_caller(plain, get), plain)
+        get.assert_not_called()
+        self.assertEqual(fill_caller([call(arguments={"id": "{{caller.oid}}"})], get)[0]["arguments"], {"id": "o-1"})
+        with self.assertRaises(CaseError) as ctx:
+            fill_caller([call(arguments={"n": "{{caller.name}}", "u": "{{caller.username}}"})], get)
+        self.assertEqual(ctx.exception.problems, [
+            "{{caller.name}}: no matching claim in the signed-in user's token",
+            "{{caller.username}}: no matching claim in the signed-in user's token",
+        ])
 
 
 class KindDetectionTests(unittest.TestCase):

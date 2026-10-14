@@ -1,1 +1,2 @@
 mcp==2.3.0
+PyJWT[crypto]==2.15.1

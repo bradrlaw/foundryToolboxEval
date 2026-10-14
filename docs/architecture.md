@@ -22,6 +22,9 @@ The two agent-eval paths complement each other:
 - ASSERT judges open-ended behavior, which regexes cannot.
 - Both call the agent through the same target code, so a platform quirk shows up the same way in each.
 
+Both paths also work with toolboxes whose connections pass the signed-in user's identity to the MCP server; see
+[entra.md](entra.md).
+
 ## 2. System context
 
 ```mermaid
@@ -42,7 +45,7 @@ flowchart TB
         models["Model deployments<br/>agent model, ASSERT models"]
     end
 
-    mcp["MCP server<br/>sample: Azure Container App"]
+    mcp["MCP server<br/>sample: Azure Container Apps,<br/>no auth or Entra-protected"]
     entra["Microsoft Entra ID"]
     appi[("Application Insights<br/>optional")]
 
@@ -54,9 +57,10 @@ flowchart TB
     agent -->|"model calls"| models
     agent -->|"MCP"| tb
     aa -->|"LLM calls"| models
-    tb -->|"MCP, via a project connection"| mcp
+    tb -->|"MCP, via a project connection:<br/>no auth, or the user's own token (OAuth2)"| mcp
     tt & ae & aa --> res
     repo -.->|"tokens from az login"| entra
+    tb -.->|"OAuth2 connection:<br/>per-user consent and refresh"| entra
     repo -.->|"spans"| appi
     foundry -.->|"server-side spans"| appi
 ```
@@ -74,12 +78,13 @@ flowchart TB
         rae["evals/run_agent_evals.py"]
         rass["scripts/run_assert.py"]
         rep["scripts/report.py"]
-        dep["scripts/deploy_toolbox.py<br/>scripts/deploy_agent.py"]
+        dep["scripts/deploy_toolbox.py<br/>scripts/deploy_agent.py<br/>scripts/setup_entra.py"]
     end
     subgraph shared["Shared modules in evals/"]
-        cases["cases.py<br/>load and validate JSONL"]
+        cases["cases.py<br/>load and validate JSONL,<br/>fill caller placeholders"]
         target["foundry_agent/target.py<br/>Responses API client"]
-        common["auth.py: Entra tokens<br/>telemetry.py: spans"]
+        common["auth.py: Entra tokens, caller claims<br/>telemetry.py: spans"]
+        terr["toolbox_errors.py<br/>consent and tool-source failures"]
     end
     mcpsdk["mcp SDK client"]
     assertai["assert-ai"]
@@ -92,10 +97,12 @@ flowchart TB
     run --> mcpsdk
     run --> cases
     run --> common
+    run --> terr
     rae --> cases
     rae --> target
     rae --> common
     target --> common
+    target --> terr
     rass --> configs
     rass --> assertai
     assertai -->|"imports target:chat"| target
@@ -108,15 +115,17 @@ flowchart TB
 | --- | --- |
 | `tooltests/run.py` | MCP client for the toolbox: one session per run, outcome classification, assertions, latency percentiles, reconnects |
 | `evals/run_agent_evals.py` | Replays multi-turn conversations against the agent and scores every turn |
-| `evals/foundry_agent/target.py` | Calls the agent through the Responses API with retries, reads `mcp_call` and `message` output items, detects platform aborts and emits agent and tool spans. Its `chat()` is ASSERT's callable target |
-| `evals/cases.py` | Finds, parses and validates JSONL cases (JSON Schema plus cross-field and cross-file rules) |
-| `evals/auth.py` | Entra tokens from `az login`, cached per scope and refreshed 5 minutes before expiry |
+| `evals/foundry_agent/target.py` | Calls the agent through the Responses API with retries, reads `mcp_call` and `message` output items, detects platform aborts and turns the agent never ran (`abort_reason`), and emits agent and tool spans. Its `chat()` is ASSERT's callable target |
+| `evals/cases.py` | Finds, parses and validates JSONL cases (JSON Schema plus cross-field and cross-file rules), and fills `{{caller.*}}` placeholders |
+| `evals/auth.py` | Entra tokens from `az login`, cached per scope and refreshed 5 minutes before expiry; the signed-in user's claims for placeholders |
+| `evals/toolbox_errors.py` | Recognizes toolbox errors caused by a tool source (consent needed, or the source failed) and prints consent links to the console, the only place they appear |
 | `evals/telemetry.py` | `span()` helper and the optional App Insights exporter; does nothing without a connection string |
 | `scripts/run_assert.py` | Runs `assert-ai run` from the repo root with artifacts under `results/assert` |
 | `scripts/report.py` | Markdown reports and baseline diffs for all three result types |
 | `scripts/validate_eval_jsonl.py` | Validates case files without running them |
-| `scripts/deploy_toolbox.py`, `deploy_agent.py`, `_az.py` | Create the connection, toolbox version and agent version through `az rest` |
-| `sample-mcp-server/` | Synthetic three-tool MCP server, packaged as a container image |
+| `scripts/deploy_toolbox.py`, `deploy_agent.py`, `_az.py` | Create the connection (no auth, OAuth2 or UserEntraToken), toolbox version and agent version through `az rest`; for OAuth2, also the client secret and redirect URI on the client app |
+| `scripts/setup_entra.py` | Registers the Entra apps for the Entra sample through Microsoft Graph: the API app (scope, app roles, your role assignments) and the OAuth client app |
+| `sample-mcp-server/` | Synthetic MCP server, packaged as a container image: three tools, plus Entra token validation (`entra_auth.py`), region filtering and `whoami` with `AUTH_MODE=entra` |
 | `tests/` | Offline unit tests: no Azure access or `.env` needed |
 
 ## 4. Cases and results
@@ -192,6 +201,10 @@ Assertion types:
 
 For agent turns, `expected_tool_calls` is required but may be empty, for example when only the reply matters.
 
+Any string in either case type may contain `{{caller.oid}}`, `{{caller.tid}}`, `{{caller.name}}` or `{{caller.username}}`.
+The runners fill them from the signed-in user's Foundry token before the run, regex-escaping values in regex fields, so
+identity checks need no real user in the files ([entra.md](entra.md#caller-placeholders)).
+
 ### Validation
 
 Both runners validate every case before running any, and `scripts/validate_eval_jsonl.py` performs the same checks
@@ -203,12 +216,15 @@ flowchart LR
     expand --> read["parse each line<br/>as JSON"]
     read --> kind["pick the schema<br/>runner: fixed kind<br/>validator: --kind, folder or first record"]
     kind --> schema["JSON Schema<br/>Draft 2020-12"]
-    schema --> rules["cross-field rules<br/>ignored fields, bad regex or embedded schema,<br/>must_not_call overlapping expected calls"]
+    schema --> rules["cross-field rules<br/>ignored fields, bad regex or embedded schema,<br/>must_not_call overlapping expected calls,<br/>unknown caller placeholders"]
     rules --> files["cross-file rules<br/>duplicate ids, turn gaps"]
     files --> ok{"any problems?"}
     ok -->|"no"| cases(["cases"])
     ok -->|"yes"| stop(["runner exits 2<br/>validator exits 1"])
 ```
+
+The runners then fill caller placeholders. They read the token's claims only if a case uses a placeholder, and a
+placeholder whose claim the token lacks exits 2.
 
 ### Result files
 
@@ -248,6 +264,7 @@ classDiagram
         +bool passed
         +list~string~ failures
         +bool platform_abort
+        +string abort_reason
         +bool history_gap
         +float latency_ms
         +int attempts
@@ -260,6 +277,7 @@ classDiagram
 
 - `outcomes` counts outcomes across repetitions.
 - `latency_ms` and `attempts` are null when a turn raised.
+- `abort_reason` is `tool_error`, `consent_required` or `tool_listing_failed` when `platform_abort` is true.
 - `report.py` matches results to a baseline by `case_id`, or by conversation and turn.
 
 ## 5. Tool tests
@@ -317,7 +335,10 @@ flowchart TD
     iserr -->|"no"| ok(["ok"])
     iserr -->|"yes"| toolerr(["tool_error"])
     raised -->|"MCPError plus a non JSON-RPC HTTP error,<br/>connection closed, or request timeout"| transport(["transport_error"])
-    raised -->|"other MCPError<br/>a JSON-RPC error response"| protocol(["protocol_error"])
+    raised -->|"other MCPError<br/>a JSON-RPC error response"| source{"caused by a tool source?<br/>toolbox_errors.classify"}
+    source -->|"needs the user's consent"| consent(["consent_required<br/>link to the console only"])
+    source -->|"failed, for example HTTP_401"| upstream(["upstream_error"])
+    source -->|"no"| protocol(["protocol_error"])
     raised -->|"RuntimeError or ValidationError<br/>result breaks outputSchema or MCP shape"| invalid(["invalid_result"])
     raised -->|"bug in the runner itself"| runner(["runner_error"])
 ```
@@ -332,7 +353,7 @@ A run passes when both of these hold:
 
 Assertions run only on the expected outcome, so they can check error text as well.
 
-- `invalid_result`, `transport_error` and `runner_error` always fail.
+- `consent_required`, `upstream_error`, `invalid_result`, `transport_error` and `runner_error` always fail.
 - A case passes when every repetition passes and none exceeds `max_latency_ms`.
 - The results record p50 and p95 latency across repetitions.
 
@@ -342,14 +363,14 @@ Assertions run only on the expected outcome, so they can check error text as wel
 stateDiagram-v2
     [*] --> Connect
     Connect --> Run: initialize and tools/list succeed
-    Connect --> SetupError: fails before any session existed
+    Connect --> SetupError: fails before any session existed,<br/>for example a tool source needs consent
     Connect --> Retry: fails after an earlier session
     Run --> Run: next case
     Run --> Retry: session lost, the current case fails as transport_error
     Retry --> Connect: reconnect 1 to 3, after 2, 4 or 8 s
     Retry --> Done: a 4th loss, remaining cases fail as not run
     Run --> Done: all cases ran
-    SetupError --> [*]: exit 2
+    SetupError --> [*]: exit 2, consent links to the console
     Done --> [*]: write results, exit 0 or 1
 ```
 
@@ -372,6 +393,18 @@ sequenceDiagram
     participant S as MCP server
     R->>T: run_agent(messages) or chat(message, history)
     T->>F: POST /openai/v1/responses<br/>agent_reference, bearer token, traceparent
+    F->>TB: tools/list as the signed-in user
+    break a tool source needs the user's consent
+        TB-->>F: CONSENT_REQUIRED with a consent link
+        F-->>T: 200 with an oauth_consent_request item and no reply
+        T-->>R: abort_reason consent_required, the link to the console only
+    end
+    break a tool source fails to list its tools
+        TB-->>F: tool source error, for example HTTP_401
+        F-->>T: HTTP 400 McpProtocolException encountered while enumerating tools
+        T-->>R: abort_reason tool_listing_failed
+    end
+    TB-->>F: tools
     F->>M: instructions, conversation and toolbox tools
     loop until the model answers
         M-->>F: tool call, for example sample___get_customer
@@ -381,7 +414,7 @@ sequenceDiagram
         break the tool returned isError
             TB-->>F: error result
             F-->>T: HTTP 400 An error occurred invoking 'tool'
-            T-->>R: platform_abort, tool name only, abort note as text
+            T-->>R: abort_reason tool_error, tool name only, abort note as text
         end
         TB-->>F: result plus a structuredResponse block
         F->>M: tool output
@@ -396,6 +429,10 @@ The agent service does not hand tool errors back to the model. An `isError` resu
 agent never gets a chance to recover. The target reports this as `platform_abort`, with the tool name parsed from the error and no
 arguments. The `tool_error_handling` ASSERT config catches the raw failure text that users would see.
 
+When the agent can't run at all, because a tool source needs the user's consent or can't list its tools, the target sets
+`abort_reason` to `consent_required` or `tool_listing_failed` and notes `[AGENT NOT RUN: ...]` instead of a reply. Such
+turns fail before any check runs, so a check like `must_not_call` can't pass on a turn that never happened.
+
 ### Retries
 
 ```mermaid
@@ -405,7 +442,7 @@ flowchart TD
     r -->|"200"| ok(["return the response,<br/>this attempt's latency and n"])
     r -->|"HTTP 408, 429, 500, 502, 503 or 504"| hint["wait for retry-after-ms or Retry-After, up to 60 s,<br/>else 5, 10, 20, then 30 s"]
     r -->|"URLError or ConnectionError"| back["wait 5, 10, 20, then 30 s"]
-    r -->|"other HTTP status"| err(["raise ResponsesAPIError<br/>HTTP 400 tool error becomes platform_abort"])
+    r -->|"other HTTP status"| err(["raise ResponsesAPIError<br/>HTTP 400 tool error or tool-listing<br/>failure becomes platform_abort"])
     r -->|"read timeout"| tmo(["raise, not retried:<br/>tools may already be running"])
     hint --> more{"n less than 8?"}
     back --> more
@@ -425,6 +462,9 @@ tries the turn needed.
 | `expected_response_pattern` | `pass_criteria` is `response_matches` or `both` | Case-insensitive regex search over the whole reply |
 | `response_must_not_match` | always | The reply does not match |
 | `max_latency_ms` | always, if set | Latency of the final HTTP attempt |
+
+A turn the agent never ran (`abort_reason` `consent_required` or `tool_listing_failed`) fails with its note, and no other
+check runs.
 
 How `expected_tool_calls` are matched:
 
@@ -486,6 +526,10 @@ ASSERT's own model calls go through LiteLLM to `azure/<deployment>`:
 
 Completed stages are cached, so a new run reuses the suite's categories and test set.
 
+If the agent never ran (missing consent, or its tools couldn't be listed), `chat()` raises `AgentNotRun`. ASSERT records
+that as a target error and leaves it unscored, so a setup problem isn't judged as a behavior violation. A `tool_error`
+abort still returns its note, for the judge to see.
+
 ```text
 results/assert/results/<suite>/
   taxonomy.json, test_set.jsonl, ...   suite stages, reused by later runs
@@ -537,10 +581,12 @@ flowchart LR
 | Caller | Credential | Audience |
 | --- | --- | --- |
 | Tool runner, agent target | `evals.auth` (AzureCliCredential, cached, thread-safe) | `https://ai.azure.com/.default`; the tool runner can take `token_scope` from `--config` |
+| Caller placeholders | `auth.caller_claims` reads the claims of that same cached token, without a signature check | None: no extra token |
 | ASSERT model calls | assert-ai's Entra auth (`ASSERT_AZURE_USE_AAD=1`) | Azure OpenAI at `AZURE_API_BASE` |
 | App Insights export | AzureCliCredential if `APPLICATIONINSIGHTS_USE_AAD=1`, else the connection string's key | App Insights ingestion |
-| Deploy scripts | `az rest` | Azure Resource Manager (connection), `https://ai.azure.com` (toolbox, agent) |
+| Deploy scripts | `az rest` | Azure Resource Manager (connection), `https://ai.azure.com` (toolbox, agent), Microsoft Graph (`setup_entra.py`, and the OAuth client's secret and redirect URI) |
 | Toolbox to the sample MCP server | The connection's `authType: None` | Unauthenticated sample server |
+| Toolbox to the Entra sample server | The connection's `authType: OAuth2`: the consenting user's token, refreshed with `offline_access` | `api://<api-app-id>/user_impersonation`, validated by the server |
 
 ### Toolbox endpoint
 
@@ -568,6 +614,8 @@ root, and `run_assert.py` runs ASSERT from the repo root so it loads the same fi
 | `APPLICATIONINSIGHTS_CONNECTION_STRING` | `evals/telemetry.py` | Turns on span export |
 | `APPLICATIONINSIGHTS_USE_AAD` | `evals/telemetry.py` | Entra auth for ingestion |
 | `OTEL_SERVICE_NAME` | `evals/telemetry.py` | Overrides the cloud role name |
+| `ENTRA_TENANT_ID`, `ENTRA_API_APP_ID` | `setup_entra.py` (writes), `deploy_toolbox.py`; the Entra sample server as Container App settings | The Entra sample's tenant and API app |
+| `ENTRA_OAUTH_CLIENT_APP_ID` | `setup_entra.py` (writes), `deploy_toolbox.py --auth-type OAuth2` | The OAuth client app for identity passthrough |
 
 ## 9. Telemetry
 
@@ -600,7 +648,8 @@ The first entry point to install the tracer provider sets the cloud role:
 
 `OTEL_SERVICE_NAME` overrides all three. Because the target injects `traceparent`, Foundry's server spans share the eval
 turn's `operation_Id`, so one trace runs from the eval turn through the model and tool calls. Use the server-side
-`execute_tool` spans for real tool latency.
+`execute_tool` spans for real tool latency. The `foundry_agent` span carries `eval.platform_abort` and `eval.abort_reason`;
+consent links never reach a span.
 
 ## 10. Reliability
 
@@ -609,15 +658,16 @@ turn's `operation_Id`, so one trace runs from the eval turn through the model an
 | `evals/auth.py` | `az` token call fails | 3 attempts (2 s, 4 s); fails fast when not signed in or `az` is missing |
 | Tool runner, HTTP | Connection fails | HTTP transport retries (3) |
 | Tool runner, session | Session lost mid-run | The current case fails as `transport_error`; reconnects up to 3 times (2, 4, 8 s); after that, the remaining cases are reported as not run |
-| Tool runner, first connect | Any failure | Setup error, exit 2 |
+| Tool runner, first connect | Any failure, including a tool source that needs consent | Setup error, exit 2; consent links are printed to the console |
 | Agent target | HTTP 408, 429, 5xx, connection errors | Up to 8 attempts, honoring `Retry-After` (up to 60 s), else 5, 10, 20, 30 s backoff (about 2.5 minutes in total) |
+| Agent target | Consent needed, or the agent's tools can't be listed | Not retried; the turn fails as not run, and ASSERT records a target error |
 | Agent target | Read timeout (180 s) | Not retried; the turn fails |
 | Agent-eval runner | Any exception in a turn | The turn fails with a runner error; the run continues |
 | Deploy scripts (`_az.rest`) | DNS, connection, 429, 502, 503, 504 | 6 attempts, waiting 10, 20, 30, 40, 50 s |
 | ASSERT | Interrupted run | Completed stages are cached and reused |
 
 All runners exit 0 when every case passes, 1 when any fails, and 2 on a setup problem (invalid cases, config, sign-in,
-connection).
+consent, connection).
 
 ## 11. Sample deployment
 
@@ -650,11 +700,18 @@ flowchart LR
 The server uses the `mcp` SDK's `MCPServer` and serves Streamable HTTP at `/mcp`. Its data is synthetic (`data.py`). A
 `ToolError` reaches the caller as an `isError` result that keeps its message.
 
+The Entra stack deploys beside this one from the same image, with `AUTH_MODE=entra`, an OAuth2 connection, its own
+toolbox and agent; its diagram is in [entra.md](entra.md#3-what-the-sample-deploys). In that mode `entra_auth.py`
+accepts only Entra user tokens issued to the server's API app, and the tools authorize from the token's app roles:
+`get_customer`, and `get_stock_quote` by customer ID, return a normal `access_denied` result for customers outside the
+caller's regions. Denials aren't tool errors, because a tool error would abort the whole agent request.
+
 | Tool, as named in the toolbox | Input | Returns | Error cases |
 | --- | --- | --- | --- |
 | `sample___get_customer` | `customer_id` (for example `C1001`) or `name` | Profile: industry, tier, region, account manager, contract value, ticker | Unknown customer or name, no input |
 | `sample___get_market_conditions` | `industry`: manufacturing, healthcare, energy or retail | Outlook, YoY growth, sentiment, drivers, risks | Unsupported industry, missing argument |
 | `sample___get_stock_quote` | `customer_id` or `ticker` | Price, change, market cap, P/E | Privately held customer (`C1005`), unknown ticker, no input |
+| `sample___whoami`, only with `AUTH_MODE=entra` | none | The caller as the server sees them: name, username, `oid`, `tid`, roles, scopes, client app, token version, visible regions | none |
 
 Deploy steps and current findings: [getting-started.md](getting-started.md) and [deploy/README.md](../deploy/README.md).
 
@@ -668,6 +725,10 @@ Deploy steps and current findings: [getting-started.md](getting-started.md) and 
 | The toolbox appends a `structuredResponse` block to tool text | Stripped by the tool runner (`split_output`) and the target (`_tool_output_text`) |
 | A tool error inside an agent run fails the whole Responses call (HTTP 400) | `platform_abort`, `history_gap`, and the `tool_error_handling` ASSERT behavior |
 | Local DNS and connection failures lasting minutes have been observed | Retries in the target and in `_az.rest` |
+| The toolbox reports a failing tool source (consent needed, or the server rejected the token) as a JSON-RPC error, and the agent as an `oauth_consent_request` item or HTTP 400 | `toolbox_errors.classify`: the outcomes `consent_required` and `upstream_error`, and the abort reasons `consent_required` and `tool_listing_failed` |
+| A consent link binds whoever completes it to the user's connection | Printed to the console only; never in results, failure text, spans or ASSERT transcripts |
+| `UserEntraToken` can't get a token for a custom MCP server's audience | The Entra sample uses OAuth2 identity passthrough |
+| A denial returned as a tool error would abort the agent request | The Entra sample returns denials as normal `access_denied` results |
 
 ## 13. Design decisions
 
@@ -690,6 +751,12 @@ Deploy steps and current findings: [getting-started.md](getting-started.md) and 
   - Tenant, subscription and resource identifiers live only in `.env`, `config/*.local.json` and
     `deploy/resources.local.md`, all git-ignored.
   - Case data is synthetic.
+- **Per-user identity as the signed-in user.**
+  - The runners act as the `az login` user, so a test sees what that user's agent would.
+  - Cases name no real user: `{{caller.*}}` placeholders fill in the identity at run time.
+  - OAuth2 identity passthrough is the supported path, because `UserEntraToken` doesn't work for custom servers.
+- **Consent links stay on the console.** Whoever completes a link binds their account to the connection, so the runners
+  treat links like secrets.
 
 ## 14. Extending
 
@@ -701,3 +768,5 @@ Deploy steps and current findings: [getting-started.md](getting-started.md) and 
 | Add an ASSERT behavior | A new config in `evals/configs/` (one behavior per config), run with `scripts/run_assert.py` |
 | Add an assertion type | `$defs.assertion` in `schemas/tool-test.schema.json`, `ASSERTION_FIELDS` in `evals/cases.py`, `check()` in `tooltests/run.py`, plus unit tests |
 | Add a span attribute | `telemetry.span(...)` calls in the runners; document it in [telemetry.md](telemetry.md) |
+| Test a toolbox that passes the user's identity | [entra.md](entra.md): consent once, then allowed and denied cases that use `{{caller.*}}` placeholders |
+| Add a caller placeholder | `CALLER_FIELDS` in `evals/cases.py` and `auth.caller_claims`, plus unit tests |
