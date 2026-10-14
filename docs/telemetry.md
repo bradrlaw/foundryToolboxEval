@@ -32,9 +32,12 @@ Run the runners with the venv python (it has `azure-monitor-opentelemetry-export
 | Cloud role | Spans |
 | --- | --- |
 | `foundry-toolbox-tests` | `toolbox.test_case` (`eval.case_id`, `eval.kind`, `eval.category`, `gen_ai.tool.name`, `eval.passed`, `eval.outcome`, `eval.latency_p50_ms`, `eval.failures`) |
-| `foundry-agent-evals` | `eval.turn` (`eval.conversation_id`, `eval.turn_number`, `eval.category`, `eval.passed`, `eval.failures`) |
-| `foundry-agent-target` | `foundry_agent` (`gen_ai.agent.name`, `eval.platform_abort`), `tool:*` (`gen_ai.tool.name`) |
+| `foundry-agent-evals` | `eval.turn` (`eval.conversation_id`, `eval.turn_number`, `eval.category`, `eval.passed`, `eval.failures`), with the target's `foundry_agent` and `tool:*` spans as children |
+| `foundry-agent-target` | `foundry_agent` (`gen_ai.agent.name`, `eval.platform_abort`) and `tool:*` (`gen_ai.tool.name`), when ASSERT runs the target or it runs on its own |
 | `responsesapi` (Foundry) | `invoke_agent`, `chat <model>`, `execute_tool` with real tool durations |
+
+A process has one cloud role, set by the first module to install the tracer provider. Under `run_agent_evals` that is the
+runner, so the target's spans carry `foundry-agent-evals`.
 
 `eval.outcome` lists the outcomes seen across a case's runs (`ok`, `tool_error`, `protocol_error`, `invalid_result`,
 `transport_error`, `runner_error`), comma-separated.

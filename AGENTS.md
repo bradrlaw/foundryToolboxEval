@@ -1,7 +1,7 @@
 # Agent Guidance
 
 Project: evaluate a Microsoft Foundry toolbox at tool level (tool tests: direct MCP calls) and agent level (agent evals: an
-agent connected to the toolbox). Read `README.md` and `docs\plan.md` first.
+agent connected to the toolbox). Read `README.md`, `docs\architecture.md` and `docs\plan.md` first.
 
 - Python 3.11+ in `.venv`: `.\.venv\Scripts\pip install -r requirements.txt` (pinned; also installs this repo in editable mode).
   Add dependencies only when needed, to both `requirements.txt` (pinned) and `pyproject.toml` (ranges). Never add

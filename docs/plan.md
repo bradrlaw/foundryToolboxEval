@@ -1,5 +1,7 @@
 # Plan
 
+How the implementation works is in [architecture.md](architecture.md).
+
 ## Goals
 
 - Measure tool behavior from the toolbox: correctness, schema conformance, errors, latency, reliability.

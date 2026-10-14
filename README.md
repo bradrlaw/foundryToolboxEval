@@ -12,7 +12,7 @@ Terminology: *tests* call the toolbox directly; *evals* involve an agent.
 This repo is independent of `copilot-studio-evals`; it reuses the idea of a canonical
 JSONL format but defines its own schemas.
 
-Docs: [getting started](docs/getting-started.md) (deploy and run the samples), [existing environment](docs/existing-environment.md) (your own Foundry project/toolbox/agents), [telemetry](docs/telemetry.md) (App Insights), [plan](docs/plan.md).
+Docs: [getting started](docs/getting-started.md) (deploy and run the samples), [existing environment](docs/existing-environment.md) (your own Foundry project/toolbox/agents), [architecture](docs/architecture.md) (components, flows and diagrams), [telemetry](docs/telemetry.md) (App Insights), [plan](docs/plan.md).
 
 ## Layout
 
@@ -26,7 +26,7 @@ Docs: [getting started](docs/getting-started.md) (deploy and run the samples), [
 | `scripts/` | `validate_eval_jsonl.py`, `report.py`, `run_assert.py` (ASSERT wrapper), `deploy_toolbox.py` (connection + toolbox), `deploy_agent.py` |
 | `sample-mcp-server/` | Synthetic MCP server (`get_customer`, `get_market_conditions`, `get_stock_quote`) to deploy and test against; run locally with `.\.venv\Scripts\python sample-mcp-server\server.py` (`http://localhost:8000/mcp`) |
 | `deploy/` | Notes and findings for the deployed sample toolbox |
-| `docs/` | Setup guides, telemetry, plan |
+| `docs/` | Setup guides, architecture, telemetry, plan |
 | `tests/` | Offline unit tests |
 | `results/` | Run output (git-ignored) |
 
