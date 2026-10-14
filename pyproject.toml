@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "foundry-toolbox-eval"
+description = "Tool tests and agent evals for Microsoft Foundry toolboxes"
+readme = "README.md"
+requires-python = ">=3.11"
+dynamic = ["version"]
+dependencies = [
+    "mcp>=2.3,<3",
+    "httpx2>=2.13",
+    "anyio>=4",
+    "pydantic>=2",
+    "jsonschema>=4.23",
+    "azure-identity>=1.19",
+    "python-dotenv>=1.0",
+    "opentelemetry-sdk>=1.30",
+]
+
+[project.optional-dependencies]
+assert = ["assert-ai[azure-auth]>=0.3"]
+appinsights = ["azure-monitor-opentelemetry-exporter>=1.0.0b50"]
+
+[tool.setuptools]
+packages = ["evals", "evals.foundry_agent", "tooltests"]
+
+[tool.setuptools.dynamic]
+version = {attr = "evals.__version__"}

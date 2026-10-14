@@ -11,12 +11,14 @@ import re
 import time
 import urllib.error
 import urllib.request
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from pathlib import Path
-from azure.identity import AzureCliCredential
+
 from dotenv import load_dotenv
 from opentelemetry import trace
 
-from evals import telemetry
+from evals import auth, telemetry
 
 # Environment-specific values live in the git-ignored .env at the repo root.
 load_dotenv(Path(__file__).resolve().parents[2] / ".env")
@@ -25,45 +27,77 @@ load_dotenv(Path(__file__).resolve().parents[2] / ".env")
 telemetry.init("foundry-agent-target")
 
 _tracer = trace.get_tracer("foundry_agent_target")
-_credential = AzureCliCredential()
 
-PROJECT_ENDPOINT = os.environ.get("FOUNDRY_PROJECT_ENDPOINT", "")
+PROJECT_ENDPOINT = os.environ.get("FOUNDRY_PROJECT_ENDPOINT", "").rstrip("/")
 if not PROJECT_ENDPOINT:
     raise RuntimeError("Set FOUNDRY_PROJECT_ENDPOINT in .env (see .env.example)")
 AGENT_NAME = os.environ.get("FOUNDRY_AGENT_NAME", "customer-assistant")
 
+REQUEST_TIMEOUT_S = 180
+# Local DNS outages have lasted minutes, so connection failures get about 2.5 minutes of backoff.
+MAX_ATTEMPTS = 8
+RETRY_STATUSES = {408, 429, 500, 502, 503, 504}
+MAX_RETRY_AFTER_S = 60.0
 
-def _token() -> str:
-    for attempt in range(4):
+
+class ResponsesAPIError(RuntimeError):
+    """Non-retryable (or retries exhausted) HTTP error from the Responses API."""
+
+    def __init__(self, status: int, body: str, latency_ms: float, attempts: int = 1):
+        super().__init__(f"Responses API {status}: {body[:500]}")
+        self.status, self.body, self.latency_ms, self.attempts = status, body, latency_ms, attempts
+
+
+def retry_delay(attempt: int, headers=None) -> float:
+    """Seconds to wait before retrying after `attempt` (0-based): the server's retry-after-ms or
+    Retry-After (capped at 60 s), else exponential backoff of 5, 10, 20, then 30 s."""
+    hints = {k.lower(): v for k, v in headers.items()} if headers is not None else {}
+    for name, scale in (("retry-after-ms", 0.001), ("retry-after", 1.0)):
+        value = hints.get(name)
+        if value is None:
+            continue
         try:
-            return _credential.get_token("https://ai.azure.com/.default").token
-        except Exception:
-            if attempt == 3:
-                raise
-            time.sleep(5 * (attempt + 1))
+            wait = float(value) * scale
+        except ValueError:
+            try:
+                wait = (parsedate_to_datetime(value) - datetime.now(timezone.utc)).total_seconds()
+            except (TypeError, ValueError):
+                continue
+        return min(MAX_RETRY_AFTER_S, max(0.0, wait))
+    return min(30.0, 5.0 * 2 ** attempt)
 
 
-def _post_responses(payload: dict) -> dict:
-    token = _token()
-    headers = {"Authorization": "Bearer " + token, "Content-Type": "application/json"}
-    if telemetry.AVAILABLE:
-        from opentelemetry.propagate import inject
-        inject(headers)  # traceparent, so Foundry's server-side spans join our trace
-    req = urllib.request.Request(
-        f"{PROJECT_ENDPOINT}/openai/v1/responses",
-        data=json.dumps(payload).encode(),
-        headers=headers,
-    )
-    for attempt in range(8):
+def _post_responses(payload: dict) -> tuple[dict, float, int]:
+    """POST to the Responses API. Returns (response JSON, latency of the final attempt in ms, attempts).
+
+    Throttling and transient HTTP errors are retried, as are connection failures. A read timeout is not:
+    the agent may already be running tools, and the latency would be meaningless anyway.
+    """
+    body = json.dumps(payload).encode()
+    for attempt in range(MAX_ATTEMPTS):
+        headers = {"Authorization": "Bearer " + auth.get_token(), "Content-Type": "application/json"}
+        if telemetry.AVAILABLE:
+            from opentelemetry.propagate import inject
+            inject(headers)  # traceparent, so Foundry's server-side spans join our trace
+        req = urllib.request.Request(f"{PROJECT_ENDPOINT}/openai/v1/responses", data=body, headers=headers)
+        start = time.perf_counter()
         try:
-            with urllib.request.urlopen(req, timeout=180) as resp:
-                return json.loads(resp.read())
+            with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT_S) as resp:
+                data = json.loads(resp.read())
+            return data, (time.perf_counter() - start) * 1000, attempt + 1
         except urllib.error.HTTPError as e:
-            raise RuntimeError(f"Responses API {e.code}: {e.read().decode(errors='replace')[:500]}") from e
-        except (urllib.error.URLError, TimeoutError):
-            if attempt == 7:
+            latency = (time.perf_counter() - start) * 1000
+            with e:  # closes the error response
+                text = e.read().decode(errors="replace")
+            if e.code not in RETRY_STATUSES or attempt == MAX_ATTEMPTS - 1:
+                raise ResponsesAPIError(e.code, text, latency, attempt + 1) from e
+            delay = retry_delay(attempt, e.headers)
+        except (urllib.error.URLError, ConnectionError):
+            if attempt == MAX_ATTEMPTS - 1:
                 raise
-            time.sleep(min(30, 10 * (attempt + 1)))
+            delay = retry_delay(attempt)
+        time.sleep(delay)
+    raise AssertionError("unreachable")
 
 
 def _tool_output_text(item: dict) -> str:
@@ -78,32 +112,31 @@ PLATFORM_ABORT_NOTE = "[AGENT FAILURE: the platform aborted the request because 
 
 
 def run_agent(messages: list[dict[str, str]]) -> dict:
-    """Call the agent once. Returns text, tool_calls [{name, arguments, output}], latency_ms, platform_abort.
+    """Call the agent once. Returns text, tool_calls [{name, arguments, output}], latency_ms, attempts and
+    platform_abort. latency_ms covers the final HTTP attempt only (no token fetch or retry waits).
 
     Finding: a toolbox tool error fails the whole Responses call with HTTP 400, so the model never sees
     it. That is reported as platform_abort=True with the tool name recovered from the error message.
     """
-    start = time.perf_counter()
     with _tracer.start_as_current_span("foundry_agent") as span:
         span.set_attribute("openinference.span.kind", "AGENT")
         span.set_attribute("gen_ai.operation.name", "invoke_agent")
         span.set_attribute("gen_ai.agent.name", AGENT_NAME)
         span.set_attribute("input.value", messages[-1]["content"])
         try:
-            data = _post_responses({
+            data, latency_ms, attempts = _post_responses({
                 "input": messages,
                 "agent_reference": {"type": "agent_reference", "name": AGENT_NAME},
             })
-        except RuntimeError as e:
-            if "Responses API 400" in str(e) and "An error occurred invoking" in str(e):
-                m = re.search(r"invoking '([^']+)'", str(e))
+        except ResponsesAPIError as e:
+            if e.status == 400 and "An error occurred invoking" in e.body:
+                m = re.search(r"invoking '([^']+)'", e.body)
                 text = f"{PLATFORM_ABORT_NOTE} {e}"
                 span.set_attribute("eval.platform_abort", True)
                 span.set_attribute("output.value", text)
                 return {
-                    "text": text, "platform_abort": True,
+                    "text": text, "platform_abort": True, "attempts": e.attempts, "latency_ms": e.latency_ms,
                     "tool_calls": [{"name": m.group(1) if m else "", "arguments": None, "output": str(e)}],
-                    "latency_ms": (time.perf_counter() - start) * 1000,
                 }
             raise
 
@@ -126,7 +159,7 @@ def run_agent(messages: list[dict[str, str]]) -> dict:
             raise RuntimeError(f"Agent response status {data.get('status')}: {data.get('error')}")
         span.set_attribute("output.value", text)
         return {"text": text, "platform_abort": False, "tool_calls": calls,
-                "latency_ms": (time.perf_counter() - start) * 1000}
+                "latency_ms": latency_ms, "attempts": attempts}
 
 
 def chat(message: str, history: list[dict[str, str]] | None = None) -> str:

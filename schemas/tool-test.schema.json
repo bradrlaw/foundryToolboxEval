@@ -1,37 +1,66 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Foundry toolbox tool test case",
+  "description": "One JSON object per line of a data/tool-tests/*.jsonl file. Validate with scripts/validate_eval_jsonl.py, which also flags fields the case's kind ignores and duplicate case_ids.",
   "type": "object",
   "required": ["case_id", "category"],
   "properties": {
     "case_id": {"type": "string", "minLength": 1},
-    "kind": {"enum": ["call", "list", "auth"], "default": "call", "description": "call = tools/call (needs tool+arguments); list = tools/list checks (expect_tools, require_schemas); auth = request with a bad/missing token (token, expect_status)"},
-    "expect_tools": {"type": "array", "items": {"type": "string"}},
-    "require_schemas": {"type": "boolean", "description": "list: every tool has a description and an object inputSchema"},
-    "token": {"enum": ["invalid", "none"]},
-    "expect_status": {"type": "integer"},
-    "tool": {"type": "string", "minLength": 1},
-    "arguments": {"type": "object"},
-    "category": {"type": "string", "minLength": 1},
-    "expect_error": {"type": "boolean", "default": false},
-    "assertions": {
-      "type": "array",
-      "items": {
-        "type": "object",
-        "required": ["type"],
-        "properties": {
-          "type": {"enum": ["contains", "regex", "json_path_equals", "json_path_exists", "schema"]},
-          "path": {"type": "string"},
-          "value": {},
-          "pattern": {"type": "string"},
-          "schema": {"type": "object", "description": "JSON Schema subset (type, required, properties, items, enum) the parsed output must satisfy; used by assertion type schema"}
-        },
-        "additionalProperties": false
-      }
+    "kind": {
+      "enum": ["call", "list", "auth"],
+      "default": "call",
+      "description": "call = tools/call (tool, arguments); list = tools/list checks (expect_tools, require_schemas); auth = initialize with a bad or missing token (token, expect_status)"
     },
+    "category": {"type": "string", "minLength": 1},
+    "tool": {"type": "string", "minLength": 1, "description": "call: toolbox tool name, e.g. sample___get_customer"},
+    "arguments": {"type": "object", "description": "call: tool arguments"},
+    "expect_error": {
+      "enum": [false, true, "tool", "protocol"],
+      "default": false,
+      "description": "call: false = the call succeeds; true or \"tool\" = the tool returns a result with isError; \"protocol\" = the toolbox rejects the request with a JSON-RPC error (e.g. a tool name it has no config for). HTTP and transport failures always fail the case."
+    },
+    "assertions": {"type": "array", "items": {"$ref": "#/$defs/assertion"}},
     "repetitions": {"type": "integer", "minimum": 1, "default": 1},
+    "expect_tools": {"type": "array", "items": {"type": "string", "minLength": 1}, "minItems": 1, "uniqueItems": true},
+    "require_schemas": {
+      "type": "boolean",
+      "default": false,
+      "description": "list: every tool has a description, an object inputSchema, and valid input/output JSON Schemas"
+    },
+    "token": {"enum": ["invalid", "none"], "description": "auth: send an invalid bearer token, or no Authorization header"},
+    "expect_status": {"type": "integer", "minimum": 100, "maximum": 599},
     "max_latency_ms": {"type": "integer", "minimum": 1},
     "notes": {"type": "string"}
   },
-  "additionalProperties": false
+  "additionalProperties": false,
+  "allOf": [
+    {"if": {"properties": {"kind": {"const": "call"}}}, "then": {"required": ["tool", "arguments"]}},
+    {"if": {"properties": {"kind": {"const": "list"}}, "required": ["kind"]}, "then": {"required": ["expect_tools"]}},
+    {"if": {"properties": {"kind": {"const": "auth"}}, "required": ["kind"]}, "then": {"required": ["token", "expect_status"]}}
+  ],
+  "$defs": {
+    "assertion": {
+      "type": "object",
+      "required": ["type"],
+      "properties": {
+        "type": {"enum": ["contains", "regex", "json_path_equals", "json_path_exists", "schema"]},
+        "value": {"description": "contains: text to find (case-insensitive); json_path_equals: expected JSON value"},
+        "pattern": {"type": "string", "format": "regex", "description": "regex: Python regular expression searched in the raw output"},
+        "path": {
+          "type": "string",
+          "pattern": "^\\$(\\.[^.\\[\\]]+|\\[\\d+\\])*$",
+          "description": "json_path_*: $-rooted path of .key and [index] steps, e.g. $.items[0].name"
+        },
+        "schema": {"type": "object", "description": "schema: JSON Schema (draft 2020-12 unless $schema says otherwise) the parsed output must satisfy"}
+      },
+      "additionalProperties": false,
+      "allOf": [
+        {"if": {"properties": {"type": {"const": "contains"}}, "required": ["type"]}, "then": {"required": ["value"], "properties": {"value": {"type": "string", "minLength": 1}}}},
+        {"if": {"properties": {"type": {"const": "regex"}}, "required": ["type"]}, "then": {"required": ["pattern"]}},
+        {"if": {"properties": {"type": {"const": "json_path_equals"}}, "required": ["type"]}, "then": {"required": ["path", "value"]}},
+        {"if": {"properties": {"type": {"const": "json_path_exists"}}, "required": ["type"]}, "then": {"required": ["path"]}},
+        {"if": {"properties": {"type": {"const": "schema"}}, "required": ["type"]}, "then": {"required": ["schema"]}}
+      ]
+    }
+  }
 }

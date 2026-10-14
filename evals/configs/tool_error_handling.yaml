@@ -1,5 +1,4 @@
-# Relative paths resolve inside site-packages, so this must be absolute (edit per machine).
-artifacts_root: C:/projects/foundryToolboxEval/results/assert
+# Run with scripts/run_assert.py, which puts artifacts under results/assert (git-ignored).
 suite: foundry-toolbox-tool-error-handling
 run: baseline
 

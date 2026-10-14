@@ -1,19 +1,20 @@
-"""Create/update the Foundry prompt agent that uses the sample toolbox (new agent version per run).
+"""Create the Foundry prompt agent that uses the toolbox, or add a new version of it on later runs.
 
-Usage: python scripts/deploy_agent.py [--model gpt-4-1-mini]
-Requires `az login` against the tenant that owns the project.
+Usage: python scripts/deploy_agent.py [--model gpt-4-1-mini] [--dry-run]
+Reads FOUNDRY_PROJECT_ENDPOINT, FOUNDRY_AGENT_NAME and FOUNDRY_TOOLBOX_NAME from .env and uses your
+`az login` (needs Azure AI User on the project).
 """
 import argparse
 import json
 import os
-import subprocess
-import tempfile
 from pathlib import Path
 
 from dotenv import load_dotenv
 
+from _az import rest
+
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")
-PROJECT = os.environ.get("FOUNDRY_PROJECT_ENDPOINT", "")
+PROJECT = os.environ.get("FOUNDRY_PROJECT_ENDPOINT", "").rstrip("/")
 if not PROJECT:
     raise SystemExit("Set FOUNDRY_PROJECT_ENDPOINT in .env (see .env.example)")
 AGENT = os.environ.get("FOUNDRY_AGENT_NAME", "customer-assistant")
@@ -24,10 +25,12 @@ INSTRUCTIONS = (
     "if a tool errors, say so plainly."
 )
 
-ap = argparse.ArgumentParser()
-ap.add_argument("--model", default="gpt-4-1-mini")
+ap = argparse.ArgumentParser(description="Create a new version of the Foundry prompt agent connected to the toolbox.")
+ap.add_argument("--model", default="gpt-4-1-mini", help="model deployment name (default: gpt-4-1-mini)")
+ap.add_argument("--dry-run", action="store_true", help="print the request instead of sending it")
 args = ap.parse_args()
 
+url = f"{PROJECT}/agents/{AGENT}/versions?api-version=v1"
 body = {"definition": {
     "kind": "prompt",
     "model": args.model,
@@ -40,16 +43,9 @@ body = {"definition": {
     }],
 }}
 
-# A body file avoids shell quoting problems with az rest on Windows.
-with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
-    json.dump(body, f)
-try:
-    out = subprocess.run(
-        ["az", "rest", "--method", "post", "--resource", "https://ai.azure.com",
-         "--url", f"{PROJECT}/agents/{AGENT}/versions?api-version=v1",
-         "--headers", "Content-Type=application/json", "--body", f"@{f.name}"],
-        capture_output=True, text=True, shell=True,
-    )
-finally:
-    os.unlink(f.name)
-print(out.stdout or out.stderr)
+if args.dry_run:
+    print(f"POST {url}\n{json.dumps(body, indent=2)}")
+    raise SystemExit(0)
+
+version = rest("POST", url, body, resource="https://ai.azure.com")
+print(f"agent {AGENT} version {version.get('version')} created (model {args.model}, toolbox {TOOLBOX})")

@@ -1,6 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Foundry agent + toolbox eval turn",
+  "description": "One JSON object per line of a data/agent-evals/*.jsonl file. Turns that share a conversation_id run in turn_number order as one conversation. Validate with scripts/validate_eval_jsonl.py, which also flags settings the pass_criteria ignores, duplicate turns, and turn-number gaps.",
   "type": "object",
   "required": ["conversation_id", "turn_number", "user_message", "expected_tool_calls", "pass_criteria", "category"],
   "properties": {
@@ -9,24 +10,50 @@
     "user_message": {"type": "string", "minLength": 1},
     "expected_tool_calls": {
       "type": "array",
-      "items": {
-        "type": "object",
-        "required": ["tool", "params"],
-        "properties": {
-          "tool": {"type": "string", "minLength": 1},
-          "params": {"type": "object"}
-        },
-        "additionalProperties": false
-      }
+      "items": {"$ref": "#/$defs/expected_call"},
+      "description": "Calls the agent must make in this turn (other calls are allowed unless listed in must_not_call). Checked when pass_criteria is tool_called_correctly or both."
     },
-    "ordered": {"type": "boolean", "default": false},
-    "must_not_call": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
-    "expected_response_pattern": {"type": ["string", "null"]},
-    "response_must_not_match": {"type": ["string", "null"]},
+    "ordered": {"type": "boolean", "default": false, "description": "expected_tool_calls must occur in this order"},
+    "must_not_call": {
+      "type": "array",
+      "items": {"type": "string", "minLength": 1},
+      "uniqueItems": true,
+      "description": "Tools that must not be called in this turn. Always enforced."
+    },
+    "expected_response_pattern": {
+      "type": ["string", "null"],
+      "format": "regex",
+      "description": "Case-insensitive Python regex the final reply must match. Required when pass_criteria is response_matches or both."
+    },
+    "response_must_not_match": {
+      "type": ["string", "null"],
+      "format": "regex",
+      "description": "Case-insensitive Python regex the final reply must not match. Always enforced."
+    },
     "pass_criteria": {"enum": ["tool_called_correctly", "response_matches", "both"]},
     "category": {"type": "string", "minLength": 1},
     "max_latency_ms": {"type": "integer", "minimum": 1},
     "notes": {"type": "string"}
   },
-  "additionalProperties": false
+  "additionalProperties": false,
+  "allOf": [
+    {
+      "if": {"properties": {"pass_criteria": {"enum": ["response_matches", "both"]}}, "required": ["pass_criteria"]},
+      "then": {"required": ["expected_response_pattern"], "properties": {"expected_response_pattern": {"type": "string", "minLength": 1}}}
+    }
+  ],
+  "$defs": {
+    "expected_call": {
+      "type": "object",
+      "required": ["tool", "params"],
+      "properties": {
+        "tool": {"type": "string", "minLength": 1},
+        "params": {
+          "type": "object",
+          "description": "Arguments the call must include (others may be present). Strings compare case-insensitively; prefix a string with re: for a case-insensitive regex search."
+        }
+      },
+      "additionalProperties": false
+    }
+  }
 }

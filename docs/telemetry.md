@@ -31,10 +31,13 @@ Run the runners with the venv python (it has `azure-monitor-opentelemetry-export
 
 | Cloud role | Spans |
 | --- | --- |
-| `foundry-toolbox-tests` | `toolbox.test_case` (case id, kind, tool, pass/fail, latency) |
-| `foundry-agent-evals` | `eval.turn` (`eval.conversation_id`, `eval.category`, `eval.passed`, `eval.failures`) |
+| `foundry-toolbox-tests` | `toolbox.test_case` (`eval.case_id`, `eval.kind`, `eval.category`, `gen_ai.tool.name`, `eval.passed`, `eval.outcome`, `eval.latency_p50_ms`, `eval.failures`) |
+| `foundry-agent-evals` | `eval.turn` (`eval.conversation_id`, `eval.turn_number`, `eval.category`, `eval.passed`, `eval.failures`) |
 | `foundry-agent-target` | `foundry_agent` (`gen_ai.agent.name`, `eval.platform_abort`), `tool:*` (`gen_ai.tool.name`) |
 | `responsesapi` (Foundry) | `invoke_agent`, `chat <model>`, `execute_tool` with real tool durations |
+
+`eval.outcome` lists the outcomes seen across a case's runs (`ok`, `tool_error`, `protocol_error`, `invalid_result`,
+`transport_error`, `runner_error`), comma-separated.
 
 The target injects a W3C `traceparent` into the Responses call, so server spans share the `operation_Id` of the eval turn
 and you can see one trace from eval turn to model and tool calls. Tool spans created by the target are zero-duration
@@ -48,6 +51,10 @@ Portal → App Insights → Logs (spans are in `dependencies`):
 // eval pass rate by day
 dependencies | where name == "eval.turn"
 | summarize turns=count(), passed=countif(tostring(customDimensions["eval.passed"]) =~ "true") by bin(timestamp, 1d)
+
+// tool-test outcomes by tool
+dependencies | where name == "toolbox.test_case"
+| summarize cases=count() by tool=tostring(customDimensions["gen_ai.tool.name"]), outcome=tostring(customDimensions["eval.outcome"])
 
 // tool latency from Foundry's server-side spans
 dependencies | where cloud_RoleName == "responsesapi" and name startswith "execute_tool"

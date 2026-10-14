@@ -25,18 +25,18 @@ az account set --subscription <subscription-id>
 ```powershell
 git clone https://github.com/<you>/foundryToolboxEval; cd foundryToolboxEval
 python -m venv .venv
-.\.venv\Scripts\pip install -r requirements.txt
-copy .env.example .env                       # fill in FOUNDRY_PROJECT_ENDPOINT, AZURE_API_BASE
-copy config\target.example.json config\sample-toolbox.local.json   # fill in (step 5)
-python -m unittest discover tests            # offline sanity check, no Azure needed
+.\.venv\Scripts\pip install -r requirements.txt   # pinned deps, plus this repo in editable mode
+copy .env.example .env                            # fill in FOUNDRY_PROJECT_ENDPOINT, AZURE_API_BASE
+.\.venv\Scripts\python -m unittest discover -s tests   # offline sanity check, no Azure needed
 ```
 
-`.env` and `config\*.local.json` are git-ignored; keep tenant-specific values there only.
+`.env` and `config\*.local.json` are git-ignored; keep tenant-specific values there only. Use the venv's python for every
+command in this guide.
 
 ## 3. Deploy the sample MCP server
 
 The server (`sample-mcp-server\`) exposes `get_customer`, `get_market_conditions`, `get_stock_quote` over synthetic data.
-You can first try it locally: `python sample-mcp-server\server.py` serves `http://localhost:8000/mcp`.
+You can first try it locally: `.\.venv\Scripts\python sample-mcp-server\server.py` serves `http://localhost:8000/mcp`.
 
 ```powershell
 $env:PYTHONIOENCODING = "utf-8"    # avoids az acr build log crash on Windows
@@ -61,26 +61,26 @@ Scripted (idempotent; each run publishes a new toolbox version and makes it the 
 
 It creates the project connection `sample-mcp-conn` (category `RemoteTool`, auth none) and the toolbox
 `sample-customer-toolbox` (server label `sample`). The account and project come from `FOUNDRY_PROJECT_ENDPOINT` in `.env`;
-`--connection`, `--server-label`, `--toolbox` and `--subscription` override defaults, and `--delete` removes both.
+`--connection`, `--server-label`, `--toolbox` and `--subscription` override defaults, `--delete` removes both, and
+`--dry-run` prints the requests without sending them.
 Needs Contributor on the Foundry resource and Azure AI User on the project. The portal (project → **Tools**) works too.
 
 The toolbox consumer endpoint is
 `<project endpoint>/toolboxes/sample-customer-toolbox/mcp?api-version=v1`. Tools appear as
 `sample___get_customer` (three underscores). Bearer token scope: `https://ai.azure.com/.default`.
 
-## 5. Create the agent and configure the runners
+## 5. Create the agent
 
 ```powershell
-.\.venv\Scripts\python scripts\deploy_agent.py --model <your-chat-deployment>
+.\.venv\Scripts\python scripts\deploy_agent.py --model <your-chat-deployment>   # --dry-run prints the request
 ```
 
-Edit `config\sample-toolbox.local.json`:
+This publishes a new version of the prompt agent `customer-assistant`, with the toolbox attached as an MCP tool.
 
-```json
-{ "toolbox": { "mcp_endpoint": "<project endpoint>/toolboxes/sample-customer-toolbox/mcp?api-version=v1",
-               "token_scope": "https://ai.azure.com/.default" },
-  "agent":   { "project_endpoint": "<project endpoint>" } }
-```
+No runner config file is needed. The tool-test runner calls `<FOUNDRY_PROJECT_ENDPOINT>/toolboxes/<FOUNDRY_TOOLBOX_NAME>/mcp`
+and the agent runners call `FOUNDRY_AGENT_NAME`; the names default to `sample-customer-toolbox` and `customer-assistant`.
+To test a different toolbox endpoint, pass `--endpoint <url>`, or copy `config\target.example.json` to
+`config\<name>.local.json`, fill it in and pass `--config`.
 
 ## 6. Run
 
@@ -91,18 +91,22 @@ Edit `config\sample-toolbox.local.json`:
 # Agent evals: deterministic checks of tool selection, arguments and answer content
 .\.venv\Scripts\python -m evals.run_agent_evals data\agent-evals\sample-toolbox.jsonl
 
-# ASSERT behavior evals (LLM-judged). First edit artifacts_root in the YAML to an absolute local path
-.\.venv\Scripts\assert-ai run --config evals\configs\ungrounded_figures.yaml
-.\.venv\Scripts\assert-ai run --config evals\configs\tool_error_handling.yaml
+# ASSERT behavior evals (LLM-judged); artifacts go to results\assert
+.\.venv\Scripts\python scripts\run_assert.py evals\configs\ungrounded_figures.yaml
+.\.venv\Scripts\python scripts\run_assert.py evals\configs\tool_error_handling.yaml
 
 # Reports (markdown); add --baseline <older run> to diff
-python scripts\report.py tool
-python scripts\report.py agent
-python scripts\report.py assert results\assert\results\<suite>\<run>
+.\.venv\Scripts\python scripts\report.py tool
+.\.venv\Scripts\python scripts\report.py agent
+.\.venv\Scripts\python scripts\report.py assert results\assert\results\<suite>\<run>
 ```
 
-Expected for the samples: tool tests 10/10 and agent evals 9/9. ASSERT results are not fixed; the first baseline found real
-violations (e.g. manufacturing data applied to aerospace).
+Expected for the samples: tool tests 12/12 and agent evals 9/9. The `c-private` turn ends in a platform abort (a tool error
+aborts the request; see Troubleshooting) and still passes: the abort message names the tool, so the tool check passes on
+the name alone (the arguments are unknown). ASSERT results are not fixed; the first baseline found real violations
+(e.g. manufacturing data applied to aerospace).
+
+Both runners exit 0 when everything passes, 1 when a case fails, and 2 on invalid cases or a setup error.
 
 Add telemetry with [telemetry.md](telemetry.md).
 
@@ -112,9 +116,10 @@ Add telemetry with [telemetry.md](telemetry.md).
 | --- | --- |
 | 401 from toolbox | `az login` to the right tenant; the token scope must be `https://ai.azure.com/.default` |
 | `FOUNDRY_PROJECT_ENDPOINT` missing | Set it in `.env` |
+| Runner exits with `invalid cases:` | Fix the listed lines; `scripts\validate_eval_jsonl.py` runs the same checks |
 | Agent run returns HTTP 400 `An error occurred invoking 'sample___...'` | Platform behavior: any tool error aborts the whole agent request. The runners record it as `[AGENT FAILURE]` / `platform_abort` |
 | Intermittent DNS / connection errors | Transient; the runners retry. Rerun failed ASSERT stages, completed stages are cached |
-| ASSERT writes into site-packages | `artifacts_root` must be absolute |
+| ASSERT writes into site-packages | Run configs through `scripts\run_assert.py`, which sets an absolute `artifacts_root` |
 | ASSERT judge output truncated | Keep `max_tokens: 24000` for the judge |
 | `pip` conflicts with openai | Don't install `azure-ai-projects` in this venv |
 | `az acr build` crashes printing logs | `$env:PYTHONIOENCODING="utf-8"`; check `az acr task list-runs` — the build usually succeeded |

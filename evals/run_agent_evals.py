@@ -1,8 +1,11 @@
 """Deterministic agent evals: run JSONL conversations against the Foundry agent and score tool calls.
 
-Complements ASSERT (which judges behavior but does not assert exact tool calls/params).
+Complements ASSERT, which judges behavior but does not check exact tool calls or parameters.
 
 Usage: python -m evals.run_agent_evals data/agent-evals/sample-toolbox.jsonl
+Results are written to results/agent-evals/run-<UTC timestamp>.json.
+
+Exit codes: 0 all turns passed, 1 some failed, 2 setup error (invalid cases, missing endpoint or sign-in).
 """
 from __future__ import annotations
 
@@ -13,9 +16,11 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT))
-from evals import telemetry  # noqa: E402
+from azure.core.exceptions import ClientAuthenticationError
+from dotenv import load_dotenv
+
+from evals import auth, telemetry
+from evals.cases import ROOT, CaseError, load_cases
 
 
 def _value_matches(expected, actual) -> bool:
@@ -50,9 +55,9 @@ def score_turn(case: dict, result: dict) -> list[str]:
                 failures.append(f"expected call {exp['tool']} {exp.get('params', {})} not made")
             elif case.get("ordered"):
                 pos += idx + 1
-        for name in case.get("must_not_call", []):
-            if any(c["name"] == name for c in calls):
-                failures.append(f"forbidden tool {name} was called")
+    for name in case.get("must_not_call", []):
+        if any(c["name"] == name for c in calls):
+            failures.append(f"forbidden tool {name} was called")
 
     if criteria in ("response_matches", "both"):
         pattern = case.get("expected_response_pattern")
@@ -68,53 +73,84 @@ def score_turn(case: dict, result: dict) -> list[str]:
 
 
 def run_conversations(cases: list[dict], agent) -> list[dict]:
+    """Run each conversation's turns in order, sending the accumulated history to `agent`.
+
+    A turn the agent never answered (runner error or platform abort) keeps its user message in the
+    history but adds no assistant message, and later turns in that conversation report history_gap.
+    """
     convs: dict[str, list[dict]] = {}
     for c in cases:
         convs.setdefault(c["conversation_id"], []).append(c)
     results = []
     for conv_id, turns in convs.items():
         history: list[dict[str, str]] = []
+        gap = False
         for case in sorted(turns, key=lambda t: t["turn_number"]):
             history.append({"role": "user", "content": case["user_message"]})
+            res = None
             with telemetry.span("eval.turn", **{
                 "eval.kind": "agent", "eval.conversation_id": conv_id,
                 "eval.turn_number": case["turn_number"], "eval.category": case["category"],
             }) as sp:
                 try:
-                    res = agent(history)
+                    res = agent(list(history))
                     failures = score_turn(case, res)
                 except Exception as e:  # a transport failure should fail the turn, not the run
-                    res = {"text": "", "tool_calls": [], "latency_ms": 0, "platform_abort": False}
-                    failures = [f"runner error: {e}"]
+                    failures = [f"runner error: {type(e).__name__}: {e}"]
                 sp.set_attribute("eval.passed", not failures)
                 sp.set_attribute("eval.failures", "; ".join(failures))
-            history.append({"role": "assistant", "content": res["text"]})
             results.append({
                 "conversation_id": conv_id, "turn_number": case["turn_number"], "category": case["category"],
                 "passed": not failures, "failures": failures,
-                "platform_abort": res["platform_abort"], "latency_ms": round(res["latency_ms"], 1),
-                "tool_calls": [{"name": c["name"], "arguments": c["arguments"]} for c in res["tool_calls"]],
-                "response": res["text"][:500],
+                "platform_abort": bool(res and res["platform_abort"]), "history_gap": gap,
+                "latency_ms": round(res["latency_ms"], 1) if res else None,
+                "attempts": res.get("attempts") if res else None,
+                "tool_calls": [{"name": c["name"], "arguments": c["arguments"]} for c in res["tool_calls"]] if res else [],
+                "response": res["text"][:500] if res else "",
             })
+            if res is None or res["platform_abort"]:
+                gap = True
+            else:
+                history.append({"role": "assistant", "content": res["text"]})
     return results
 
 
-def main() -> int:
-    ap = argparse.ArgumentParser()
-    ap.add_argument("cases", nargs="+", type=Path)
-    ap.add_argument("--out", type=Path, default=ROOT / "results" / "agent-evals")
-    args = ap.parse_args()
+def _fmt_ms(ms: float | None) -> str:
+    return "-" if ms is None else f"{ms:.0f}ms"
 
-    from dotenv import load_dotenv
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(description="Run agent-eval conversations against the Foundry agent and score its tool calls.")
+    ap.add_argument("cases", nargs="+", help="agent-eval JSONL files or glob patterns")
+    ap.add_argument("--out", type=Path, default=ROOT / "results" / "agent-evals")
+    args = ap.parse_args(argv)
+
+    try:
+        cases = load_cases(args.cases, "agent")
+    except CaseError as e:
+        print("invalid cases:\n  " + "\n  ".join(e.problems), file=sys.stderr)
+        return 2
+    if not cases:
+        print("error: no cases found", file=sys.stderr)
+        return 2
+
     load_dotenv(ROOT / ".env")
     telemetry.init("foundry-agent-evals")
-    from evals.foundry_agent.target import run_agent
+    try:
+        from evals.foundry_agent import target  # reads FOUNDRY_PROJECT_ENDPOINT at import
+        auth.get_token()
+    except RuntimeError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+    except ClientAuthenticationError as e:
+        print(f"error: cannot get a token for {auth.FOUNDRY_SCOPE} (signed in with az login?): {e}", file=sys.stderr)
+        return 2
 
-    cases = [json.loads(l) for p in args.cases for l in p.read_text(encoding="utf-8").splitlines() if l.strip()]
-    results = run_conversations(cases, run_agent)
+    results = run_conversations(cases, target.run_agent)
     for r in results:
-        flag = " [platform abort]" if r["platform_abort"] else ""
-        print(f"{'PASS' if r['passed'] else 'FAIL'} {r['conversation_id']}#{r['turn_number']} {r['category']}{flag} {r['latency_ms']:.0f}ms")
+        flags = "".join(f" [{name.replace('_', ' ')}]" for name in ("platform_abort", "history_gap") if r[name])
+        print(f"{'PASS' if r['passed'] else 'FAIL'} {r['conversation_id']}#{r['turn_number']} {r['category']}{flags} "
+              f"{_fmt_ms(r['latency_ms'])}")
         for f in r["failures"]:
             print(f"       - {f}")
     passed = sum(r["passed"] for r in results)
@@ -122,7 +158,10 @@ def main() -> int:
 
     args.out.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    (args.out / f"run-{stamp}.json").write_text(json.dumps({"timestamp": stamp, "results": results}, indent=2), encoding="utf-8")
+    out = args.out / f"run-{stamp}.json"
+    out.write_text(json.dumps({"agent": target.AGENT_NAME, "timestamp": stamp, "results": results}, indent=2),
+                   encoding="utf-8")
+    print(f"results: {out}")
     return 0 if passed == len(results) else 1
 
 

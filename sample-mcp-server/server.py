@@ -1,26 +1,26 @@
-"""Sample MCP server exposing synthetic customer, market, and stock tools.
+r"""Sample MCP server exposing synthetic customer, market, and stock tools.
 
-Run locally: python sample-mcp-server\server.py   (serves http://localhost:8000/mcp)
+Run locally from the repo root:  .\.venv\Scripts\python sample-mcp-server\server.py
+Serves streamable HTTP at http://localhost:8000/mcp (HOST and PORT override the bind address).
 """
 import json
 import os
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver.exceptions import ToolError
 
 import data
 
-mcp = FastMCP(
-    "sample-customer-tools",
-    host=os.environ.get("HOST", "0.0.0.0"),
-    port=int(os.environ.get("PORT", "8000")),
-)
+mcp = MCPServer("sample-customer-tools", version="1.0.0")
 
 
 def _run(fn, **kwargs) -> str:
     try:
         return json.dumps(fn(**kwargs))
     except data.ToolError as e:
-        raise ValueError(str(e)) from e
+        # Only ToolError keeps its message in the isError result; other exceptions
+        # reach the caller as a bare "Error executing tool <name>".
+        raise ToolError(str(e)) from e
 
 
 @mcp.tool()
@@ -45,4 +45,8 @@ def get_stock_quote(customer_id: str | None = None, ticker: str | None = None) -
 
 
 if __name__ == "__main__":
-    mcp.run(transport="streamable-http")
+    mcp.run(
+        transport="streamable-http",
+        host=os.environ.get("HOST", "0.0.0.0"),
+        port=int(os.environ.get("PORT", "8000")),
+    )

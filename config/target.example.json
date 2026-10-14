@@ -1,11 +1,6 @@
 {
   "toolbox": {
-    "mcp_endpoint": "https://<toolbox-endpoint>/mcp",
-    "auth": "entra"
-  },
-  "agent": {
-    "project_endpoint": "https://<resource>.services.ai.azure.com/api/projects/<project>",
-    "agent_id": "<agent-id>",
-    "model": "<deployment-name>"
+    "mcp_endpoint": "https://<foundry-resource>.services.ai.azure.com/api/projects/<project>/toolboxes/<toolbox>/mcp?api-version=v1",
+    "token_scope": "https://ai.azure.com/.default"
   }
 }

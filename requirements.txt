@@ -1,5 +1,13 @@
+# Pinned, tested versions. pyproject.toml declares the same packages with looser ranges.
 assert-ai[azure-auth]==0.3.0
 mcp==2.3.0
+httpx2==2.13.1
+jsonschema==4.26.0
+azure-identity==1.26.0
 python-dotenv==1.2.4
-# Do not add azure-ai-projects: it needs openai>=3, which conflicts with assert-ai.
+opentelemetry-sdk==1.45.0
 azure-monitor-opentelemetry-exporter==1.0.0b58
+# Do not add azure-ai-projects: it needs openai>=3, which conflicts with assert-ai.
+
+# Makes evals and tooltests importable from anywhere (python -m ..., tests, ASSERT targets).
+-e .

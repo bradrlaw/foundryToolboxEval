@@ -1,13 +1,14 @@
-import sys
+import contextlib
+import io
+import tempfile
 import unittest
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from evals.run_agent_evals import run_conversations, score_turn  # noqa: E402
+from evals.run_agent_evals import main, run_conversations, score_turn
 
 
-def res(calls, text="", latency=100.0):
-    return {"text": text, "latency_ms": latency, "platform_abort": False, "tool_calls": calls}
+def res(calls, text="", latency=100.0, abort=False):
+    return {"text": text, "latency_ms": latency, "platform_abort": abort, "tool_calls": calls, "attempts": 1}
 
 
 def call(tool, **args):
@@ -39,6 +40,15 @@ class ScoreTurnTests(unittest.TestCase):
         self.assertEqual(score_turn(c, res([call("ok")])), [])
         self.assertIn("forbidden", score_turn(c, res([call("bad")]))[0])
 
+    def test_must_not_call_enforced_for_any_criteria(self):
+        c = case(pass_criteria="response_matches", expected_response_pattern="fine", must_not_call=["bad"])
+        self.assertEqual(score_turn(c, res([call("bad")], text="fine")), ["forbidden tool bad was called"])
+
+    def test_response_matches_ignores_expected_calls(self):
+        c = case(pass_criteria="response_matches", expected_response_pattern="fine",
+                 expected_tool_calls=[{"tool": "t", "params": {}}])
+        self.assertEqual(score_turn(c, res([], text="fine")), [])
+
     def test_ordered(self):
         c = case(ordered=True, expected_tool_calls=[{"tool": "a", "params": {}}, {"tool": "b", "params": {}}])
         self.assertEqual(score_turn(c, res([call("a"), call("b")])), [])
@@ -55,24 +65,65 @@ class ScoreTurnTests(unittest.TestCase):
 
 
 class ConversationTests(unittest.TestCase):
-    def test_history_accumulates_and_errors_fail_turn(self):
+    def run_turns(self, agent, n=2):
+        # Listed in reverse so the runner must sort by turn_number.
+        cases = [{"conversation_id": "x", "turn_number": i, "user_message": f"m{i}", "category": "c", **case()}
+                 for i in range(n, 0, -1)]
+        return run_conversations(cases, agent)
+
+    def test_history_accumulates_in_turn_order(self):
         seen = []
 
         def agent(history):
-            seen.append(len(history))
-            if len(seen) == 2:
-                raise RuntimeError("boom")
-            return res([], text="hi")
+            seen.append([(m["role"], m["content"]) for m in history])
+            return res([], text=f"r{len(seen)}")
 
-        cases = [
-            {"conversation_id": "x", "turn_number": 2, "user_message": "b", "category": "c", **case()},
-            {"conversation_id": "x", "turn_number": 1, "user_message": "a", "category": "c", **case()},
-        ]
-        out = run_conversations(cases, agent)
+        out = self.run_turns(agent)
         self.assertEqual([r["turn_number"] for r in out], [1, 2])
-        self.assertEqual(seen, [1, 3])
-        self.assertTrue(out[0]["passed"])
-        self.assertIn("runner error", out[1]["failures"][0])
+        self.assertEqual(seen, [[("user", "m1")], [("user", "m1"), ("assistant", "r1"), ("user", "m2")]])
+        self.assertEqual([r["history_gap"] for r in out], [False, False])
+
+    def test_runner_error_fails_turn_and_is_not_replayed(self):
+        seen = []
+
+        def agent(history):
+            seen.append([m["role"] for m in history])
+            if len(seen) == 1:
+                raise RuntimeError("boom")
+            return res([], text="ok")
+
+        out = self.run_turns(agent)
+        self.assertEqual(out[0]["failures"], ["runner error: RuntimeError: boom"])
+        self.assertIsNone(out[0]["latency_ms"])
+        self.assertEqual(seen[1], ["user", "user"])
+        self.assertTrue(out[1]["passed"])
+        self.assertTrue(out[1]["history_gap"])
+
+    def test_platform_abort_note_is_not_replayed(self):
+        seen = []
+
+        def agent(history):
+            seen.append([m["content"] for m in history])
+            if len(seen) == 1:
+                return res([{"name": "t", "arguments": None, "output": "x"}], text="[AGENT FAILURE: ...]", abort=True)
+            return res([], text="ok")
+
+        out = self.run_turns(agent, n=3)
+        self.assertTrue(out[0]["platform_abort"])
+        self.assertEqual(seen[1], ["m1", "m2"])
+        self.assertEqual(seen[2], ["m1", "m2", "ok", "m3"])
+        self.assertEqual([r["history_gap"] for r in out], [False, True, True])
+
+
+class MainTests(unittest.TestCase):
+    def test_invalid_cases_exit_2_before_contacting_the_agent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "bad.jsonl"
+            path.write_text('{"conversation_id": "x"}\n', encoding="utf-8")
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                self.assertEqual(main([str(path)]), 2)
+        self.assertIn("'turn_number' is a required property", err.getvalue())
 
 
 if __name__ == "__main__":
