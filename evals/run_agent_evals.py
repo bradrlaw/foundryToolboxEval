@@ -9,7 +9,8 @@ Results are written to results/agent-evals/run-<UTC timestamp>.json.
 
 Cases may use {{caller.oid}}, {{caller.tid}}, {{caller.name}} and {{caller.username}}, filled from the
 signed-in user's token. A turn the agent could not run at all (consent_required, tool_listing_failed)
-fails with that reason; consent links are printed to the console only, never saved.
+fails with that reason; consent links are printed to the console only, never saved. Each failure message
+is recorded with a reason code (evals/reasons.py) so reports can say why turns failed.
 
 Exit codes: 0 all turns passed, 1 some failed, 2 setup error (invalid cases, missing endpoint or sign-in).
 """
@@ -27,7 +28,10 @@ from dotenv import load_dotenv
 
 from evals import auth, telemetry
 from evals.cases import ROOT, CaseError, fill_caller, load_cases
+from evals.reasons import Failure, summary_line
 from evals.toolbox_errors import AGENT_NOT_RUN
+
+MAX_MESSAGE = 300
 
 
 def _value_matches(expected, actual) -> bool:
@@ -47,37 +51,51 @@ def _call_matches(expected: dict, actual: dict) -> bool:
     return all(k in args and _value_matches(v, args[k]) for k, v in expected.get("params", {}).items())
 
 
-def score_turn(case: dict, result: dict) -> list[str]:
-    """Return a list of failure reasons (empty = pass)."""
+def _missed(expected: dict, calls: list[dict], used: set[int]) -> Failure:
+    """Why no call matched an expected call. `used` holds calls that ordered matching already consumed."""
+    what = f"expected call {expected['tool']} {expected.get('params', {})}"
+    if any(i not in used and _call_matches(expected, c) for i, c in enumerate(calls)):
+        return Failure("wrong_order", f"{what} made out of order")
+    args = [c["arguments"] for i, c in enumerate(calls) if i not in used and c["name"] == expected["tool"]]
+    if not args:
+        return Failure("missing_call", f"{what} not made")
+    message = f"{what} not made; {expected['tool']} was called with {'; '.join(map(str, args))}"
+    return Failure("wrong_arguments", message if len(message) <= MAX_MESSAGE else message[:MAX_MESSAGE - 3] + "...")
+
+
+def score_turn(case: dict, result: dict) -> list[Failure]:
+    """Return the turn's failures (empty = pass)."""
     if result.get("abort_reason") in AGENT_NOT_RUN:
-        return [result["text"]]  # nothing to score; must_not_call and must-not-match checks would pass vacuously
+        # Nothing to score; must_not_call and must-not-match checks would pass vacuously.
+        return [Failure(result["abort_reason"], result["text"])]
     calls = result["tool_calls"]
     criteria = case["pass_criteria"]
-    failures: list[str] = []
+    failures: list[Failure] = []
 
     if criteria in ("tool_called_correctly", "both"):
-        pos = 0
+        pos, used = 0, set()
         for exp in case["expected_tool_calls"]:
-            pool = calls[pos:] if case.get("ordered") else calls
-            idx = next((i for i, c in enumerate(pool) if _call_matches(exp, c)), None)
+            start = pos if case.get("ordered") else 0
+            idx = next((i for i in range(start, len(calls)) if _call_matches(exp, calls[i])), None)
             if idx is None:
-                failures.append(f"expected call {exp['tool']} {exp.get('params', {})} not made")
+                failures.append(_missed(exp, calls, used))
             elif case.get("ordered"):
-                pos += idx + 1
+                used.add(idx)
+                pos = idx + 1
     for name in case.get("must_not_call", []):
         if any(c["name"] == name for c in calls):
-            failures.append(f"forbidden tool {name} was called")
+            failures.append(Failure("forbidden_call", f"forbidden tool {name} was called"))
 
     if criteria in ("response_matches", "both"):
         pattern = case.get("expected_response_pattern")
         if pattern and not re.search(pattern, result["text"], re.I | re.S):
-            failures.append(f"response does not match /{pattern}/")
+            failures.append(Failure("response_mismatch", f"response does not match /{pattern}/"))
     bad = case.get("response_must_not_match")
     if bad and re.search(bad, result["text"], re.I | re.S):
-        failures.append(f"response matches forbidden /{bad}/")
+        failures.append(Failure("forbidden_response", f"response matches forbidden /{bad}/"))
 
     if (limit := case.get("max_latency_ms")) and result["latency_ms"] > limit:
-        failures.append(f"latency {result['latency_ms']:.0f}ms > {limit}ms")
+        failures.append(Failure("latency", f"latency {result['latency_ms']:.0f}ms > {limit}ms"))
     return failures
 
 
@@ -103,14 +121,16 @@ def run_conversations(cases: list[dict], agent) -> list[dict]:
             }) as sp:
                 try:
                     res = agent(list(history))
-                    failures = score_turn(case, res)
+                    found = score_turn(case, res)
                 except Exception as e:  # a transport failure should fail the turn, not the run
-                    failures = [f"runner error: {type(e).__name__}: {e}"]
-                sp.set_attribute("eval.passed", not failures)
+                    found = [Failure("runner_error", f"runner error: {type(e).__name__}: {e}")]
+                failures, reasons = [f.message for f in found], [f.reason for f in found]
+                sp.set_attribute("eval.passed", not found)
                 sp.set_attribute("eval.failures", "; ".join(failures))
+                sp.set_attribute("eval.reasons", ",".join(sorted(set(reasons))))
             results.append({
                 "conversation_id": conv_id, "turn_number": case["turn_number"], "category": case["category"],
-                "passed": not failures, "failures": failures,
+                "passed": not found, "failures": failures, "reasons": reasons,
                 "platform_abort": bool(res and res["platform_abort"]),
                 "abort_reason": res.get("abort_reason") if res else None, "history_gap": gap,
                 "latency_ms": round(res["latency_ms"], 1) if res else None,
@@ -176,6 +196,8 @@ def main(argv: list[str] | None = None) -> int:
             print(f"       - {f}")
     passed = sum(r["passed"] for r in results)
     print(f"\n{passed}/{len(results)} passed")
+    if why := summary_line(results):
+        print(why)
     if any(r["abort_reason"] == "consent_required" for r in results):
         print("Some turns did not run: the agent's OAuth tool connection needs the signed-in user's consent. "
               "Open the link printed above, approve, then rerun.", file=sys.stderr)

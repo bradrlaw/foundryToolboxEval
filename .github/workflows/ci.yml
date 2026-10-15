@@ -1,0 +1,61 @@
+# Offline checks only: no Azure credentials, no live toolbox or agent calls.
+name: CI
+
+on:
+  push:
+    branches: [main]
+    paths-ignore: ["docs/**", "**/*.md"]
+  pull_request:
+    paths-ignore: ["docs/**", "**/*.md"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  test:
+    name: Tests (${{ matrix.os }}, Python ${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # 3.11 is the floor in pyproject.toml; 3.14 is what the docs use.
+          - { os: ubuntu-latest, python: "3.11" }
+          - { os: ubuntu-latest, python: "3.14" }
+          - { os: windows-latest, python: "3.14" }
+    env:
+      PYTHONIOENCODING: utf-8
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            sample-mcp-server/requirements.txt
+
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt -r sample-mcp-server/requirements.txt
+
+      - name: Check dependency conflicts
+        run: python -m pip check
+
+      - name: Compile all sources
+        run: python -m compileall -q evals tooltests scripts sample-mcp-server tests
+
+      - name: Validate eval case files
+        run: python scripts/validate_eval_jsonl.py "data/tool-tests/*.jsonl" "data/agent-evals/*.jsonl"
+
+      - name: Unit tests
+        run: python -m unittest discover -s tests

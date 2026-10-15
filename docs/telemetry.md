@@ -31,8 +31,8 @@ Run the runners with the venv python (it has `azure-monitor-opentelemetry-export
 
 | Cloud role | Spans |
 | --- | --- |
-| `foundry-toolbox-tests` | `toolbox.test_case` (`eval.case_id`, `eval.kind`, `eval.category`, `gen_ai.tool.name`, `eval.passed`, `eval.outcome`, `eval.latency_p50_ms`, `eval.failures`) |
-| `foundry-agent-evals` | `eval.turn` (`eval.conversation_id`, `eval.turn_number`, `eval.category`, `eval.passed`, `eval.failures`), with the target's `foundry_agent` and `tool:*` spans as children |
+| `foundry-toolbox-tests` | `toolbox.test_case` (`eval.case_id`, `eval.kind`, `eval.category`, `gen_ai.tool.name`, `eval.passed`, `eval.outcome`, `eval.latency_p50_ms`, `eval.failures`, `eval.reasons`) |
+| `foundry-agent-evals` | `eval.turn` (`eval.conversation_id`, `eval.turn_number`, `eval.category`, `eval.passed`, `eval.failures`, `eval.reasons`), with the target's `foundry_agent` and `tool:*` spans as children |
 | `foundry-agent-target` | `foundry_agent` (`gen_ai.agent.name`, `eval.platform_abort`, `eval.abort_reason`) and `tool:*` (`gen_ai.tool.name`), when ASSERT runs the target or it runs on its own |
 | `responsesapi` (Foundry) | `invoke_agent`, `chat <model>`, `execute_tool` with real tool durations |
 
@@ -40,9 +40,10 @@ A process has one cloud role, set by the first module to install the tracer prov
 runner, so the target's spans carry `foundry-agent-evals`.
 
 `eval.outcome` lists the outcomes seen across a case's runs (`ok`, `tool_error`, `protocol_error`, `consent_required`,
-`upstream_error`, `invalid_result`, `transport_error`, `runner_error`), comma-separated. `eval.abort_reason` is
-`tool_error`, `consent_required` or `tool_listing_failed` when `eval.platform_abort` is true
-([entra.md](entra.md#failures-specific-to-identity)).
+`upstream_error`, `invalid_result`, `transport_error`, `runner_error`), comma-separated. `eval.reasons` lists the distinct
+reason codes of a failed case or turn ([evals/reasons.py](../evals/reasons.py)), comma-separated, and is empty when it
+passed. `eval.abort_reason` is `tool_error`, `consent_required` or `tool_listing_failed` when `eval.platform_abort` is
+true ([entra.md](entra.md#failures-specific-to-identity)).
 
 Consent links never appear in spans. Identity cases can put the test user's object ID, name or username into span
 attributes: agent replies in `output.value`, and failure messages with filled-in `{{caller.*}}` values in `eval.failures`.
@@ -63,6 +64,11 @@ dependencies | where name == "eval.turn"
 // tool-test outcomes by tool
 dependencies | where name == "toolbox.test_case"
 | summarize cases=count() by tool=tostring(customDimensions["gen_ai.tool.name"]), outcome=tostring(customDimensions["eval.outcome"])
+
+// failed tool-test cases and agent turns by reason
+dependencies | where name in ("toolbox.test_case", "eval.turn") and tostring(customDimensions["eval.passed"]) =~ "false"
+| mv-expand reason = split(tostring(customDimensions["eval.reasons"]), ",") to typeof(string)
+| summarize failed=count() by name, reason, bin(timestamp, 1d)
 
 // tool latency from Foundry's server-side spans
 dependencies | where cloud_RoleName == "responsesapi" and name startswith "execute_tool"

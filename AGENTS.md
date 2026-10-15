@@ -7,6 +7,10 @@ agent connected to the toolbox). Read `README.md`, `docs\architecture.md` and `d
   Add dependencies only when needed, to both `requirements.txt` (pinned) and `pyproject.toml` (ranges). Never add
   `azure-ai-projects`: it needs `openai>=3`, which conflicts with assert-ai.
 - Tests: `.\.venv\Scripts\python -m unittest discover -s tests`. They run offline and must not depend on Azure or `.env`.
+  CI (`.github\workflows\ci.yml`) runs them on Ubuntu with Python 3.11 and 3.14 and on Windows with 3.14, so keep code
+  3.11-compatible.
+- Each failure carries a reason code (`Failure` in `evals\reasons.py`). Describe new codes in `TOOL_REASONS` or
+  `AGENT_REASONS`; `tests\test_reasons.py` checks.
 - Eval data is JSONL validated against `schemas\` plus the rules in `evals\cases.py` (`scripts\validate_eval_jsonl.py`).
   Use synthetic data only.
 - Never commit secrets, tenant-specific values or run output. Local values go in the git-ignored `.env`,

@@ -7,6 +7,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from evals.reasons import Failure
 from evals.run_agent_evals import main, run_conversations, score_turn
 
 # main imports the target, which reads its settings at import time.
@@ -36,8 +37,9 @@ class ScoreTurnTests(unittest.TestCase):
 
     def test_missing_call_and_wrong_params_fail(self):
         c = case(expected_tool_calls=[{"tool": "t", "params": {"id": "C1"}}])
-        self.assertTrue(score_turn(c, res([])))
-        self.assertTrue(score_turn(c, res([call("t", id="C2")])))
+        self.assertEqual(score_turn(c, res([call("u")])), [("missing_call", "expected call t {'id': 'C1'} not made")])
+        self.assertEqual(score_turn(c, res([call("t", id="C2"), call("t", id="C3")])), [
+            ("wrong_arguments", "expected call t {'id': 'C1'} not made; t was called with {'id': 'C2'}; {'id': 'C3'}")])
 
     def test_regex_param(self):
         c = case(expected_tool_calls=[{"tool": "t", "params": {"name": "re:north"}}])
@@ -46,11 +48,12 @@ class ScoreTurnTests(unittest.TestCase):
     def test_must_not_call(self):
         c = case(must_not_call=["bad"])
         self.assertEqual(score_turn(c, res([call("ok")])), [])
-        self.assertIn("forbidden", score_turn(c, res([call("bad")]))[0])
+        self.assertEqual(score_turn(c, res([call("bad")]))[0].reason, "forbidden_call")
 
     def test_must_not_call_enforced_for_any_criteria(self):
         c = case(pass_criteria="response_matches", expected_response_pattern="fine", must_not_call=["bad"])
-        self.assertEqual(score_turn(c, res([call("bad")], text="fine")), ["forbidden tool bad was called"])
+        self.assertEqual(score_turn(c, res([call("bad")], text="fine")),
+                         [Failure("forbidden_call", "forbidden tool bad was called")])
 
     def test_response_matches_ignores_expected_calls(self):
         c = case(pass_criteria="response_matches", expected_response_pattern="fine",
@@ -60,12 +63,17 @@ class ScoreTurnTests(unittest.TestCase):
     def test_ordered(self):
         c = case(ordered=True, expected_tool_calls=[{"tool": "a", "params": {}}, {"tool": "b", "params": {}}])
         self.assertEqual(score_turn(c, res([call("a"), call("b")])), [])
-        self.assertTrue(score_turn(c, res([call("b"), call("a")])))
+        self.assertEqual(score_turn(c, res([call("b"), call("a")])), [("wrong_order", "expected call b {} made out of order")])
+
+    def test_ordered_repeat_needs_a_second_call(self):
+        c = case(ordered=True, expected_tool_calls=[{"tool": "a", "params": {}}, {"tool": "a", "params": {}}])
+        self.assertEqual(score_turn(c, res([call("a"), call("a")])), [])
+        self.assertEqual([f.reason for f in score_turn(c, res([call("a")]))], ["missing_call"])
 
     def test_response_patterns_and_latency(self):
         c = case(pass_criteria="both", expected_response_pattern=r"84\.12", response_must_not_match="sorry", max_latency_ms=50)
         fails = score_turn(c, res([], text="price is 99 sorry", latency=100))
-        self.assertEqual(len(fails), 3)
+        self.assertEqual([f.reason for f in fails], ["response_mismatch", "forbidden_response", "latency"])
 
     def test_platform_abort_matches_on_name_only(self):
         c = case(expected_tool_calls=[{"tool": "t", "params": {"id": "C1"}}])
@@ -77,7 +85,7 @@ class ScoreTurnTests(unittest.TestCase):
                  response_must_not_match="secret")
         for reason in ("consent_required", "tool_listing_failed"):
             r = {**res([], text=f"[AGENT NOT RUN: {reason}]", abort=True), "abort_reason": reason}
-            self.assertEqual(score_turn(c, r), [f"[AGENT NOT RUN: {reason}]"])
+            self.assertEqual(score_turn(c, r), [(reason, f"[AGENT NOT RUN: {reason}]")])
 
 
 class ConversationTests(unittest.TestCase):
@@ -110,9 +118,11 @@ class ConversationTests(unittest.TestCase):
 
         out = self.run_turns(agent)
         self.assertEqual(out[0]["failures"], ["runner error: RuntimeError: boom"])
+        self.assertEqual(out[0]["reasons"], ["runner_error"])
         self.assertIsNone(out[0]["latency_ms"])
         self.assertEqual(seen[1], ["user", "user"])
         self.assertTrue(out[1]["passed"])
+        self.assertEqual(out[1]["reasons"], [])
         self.assertTrue(out[1]["history_gap"])
 
     def test_platform_abort_note_is_not_replayed(self):

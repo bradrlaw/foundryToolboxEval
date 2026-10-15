@@ -123,12 +123,17 @@ class CallCaseTests(unittest.TestCase):
         c = case(expect_error="protocol", assertions=[{"type": "contains", "value": "No tool config"}])
         r = self.run_call(c, run.Outcome("protocol_error", "No tool config matches", latency_ms=5))
         self.assertTrue(r["passed"], r["failures"])
-        self.assertEqual(r["outcomes"], {"protocol_error": 1})
+        self.assertEqual((r["outcomes"], r["reasons"]), ({"protocol_error": 1}, []))
 
     def test_assertions_are_skipped_when_the_outcome_is_wrong(self):
         c = case(assertions=[{"type": "contains", "value": "zzz"}])
         r = self.run_call(c, run.Outcome("tool_error", "Customer 'BAD' not found", latency_ms=5))
         self.assertEqual(r["failures"], ["expected ok, got tool_error: Customer 'BAD' not found"])
+        self.assertEqual(r["reasons"], ["tool_error"])
+
+    def test_success_when_an_error_is_expected(self):
+        r = self.run_call(case(expect_error="tool"), run.Outcome("ok", "{}", {}, 5))
+        self.assertEqual((r["failures"], r["reasons"]), (["expected tool_error, got ok: {}"], ["unexpected_success"]))
 
     def test_repetitions_count_failures_and_latency(self):
         c = case(repetitions=3, max_latency_ms=500, assertions=[{"type": "json_path_exists", "path": "$.a"}])
@@ -139,6 +144,7 @@ class CallCaseTests(unittest.TestCase):
             "expected ok, got transport_error: HTTP 503: busy (1/3 runs)",
             "latency > 500ms in 1/3 runs (max 600ms)",
         ])
+        self.assertEqual(r["reasons"], ["assertion", "transport_error", "latency"])
         self.assertEqual((r["latency_p50_ms"], r["latency_p95_ms"]), (600, 700))
         self.assertEqual(r["outcomes"], {"ok": 2, "transport_error": 1})
 
@@ -154,6 +160,7 @@ class ListCaseTests(unittest.TestCase):
         self.assertIn("b: empty description", r["failures"])
         self.assertIn("b: input schema is not an object schema", r["failures"])
         self.assertTrue(any(f.startswith("b: invalid output schema") for f in r["failures"]))
+        self.assertEqual(r["reasons"], ["duplicate_tool", "missing_tool"] + ["tool_definition"] * 3)
 
 
 class RunAllTests(NoTokenTestCase):
@@ -191,6 +198,7 @@ class RunAllTests(NoTokenTestCase):
         results, info = self.run_all([case("a"), case("b"), case("c")], run_case)
         self.assertEqual([r["case_id"] for r in results], ["a", "b", "c"])
         self.assertEqual(results[1]["failures"], ["session lost: ConnectError: boom"])
+        self.assertEqual(results[1]["reasons"], ["transport_error"])
         self.assertEqual(results[1]["outcomes"], {"transport_error": 1})
         self.assertEqual((self.connects, info["protocol_version"]), (2, "2025-11-25"))
 
@@ -202,6 +210,7 @@ class RunAllTests(NoTokenTestCase):
         lost = [r for r in results if r["failures"][0].startswith("session lost")]
         not_run = [r for r in results if r["failures"][0].startswith("not run")]
         self.assertEqual((len(lost), len(not_run)), (run.MAX_RECONNECTS + 1, 6 - run.MAX_RECONNECTS - 1))
+        self.assertEqual({r["reasons"][0] for r in not_run}, {"not_run"})
 
     def test_failed_reconnect_is_retried(self):
         seen = []

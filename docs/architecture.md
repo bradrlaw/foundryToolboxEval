@@ -85,6 +85,7 @@ flowchart TB
         target["foundry_agent/target.py<br/>Responses API client"]
         common["auth.py: Entra tokens, caller claims<br/>telemetry.py: spans"]
         terr["toolbox_errors.py<br/>consent and tool-source failures"]
+        reasons["reasons.py<br/>failure reason codes"]
     end
     mcpsdk["mcp SDK client"]
     assertai["assert-ai"]
@@ -108,6 +109,7 @@ flowchart TB
     assertai -->|"imports target:chat"| target
     cases --> files
     rep --> results
+    run & rae & rep --> reasons
     dep --> az
 ```
 
@@ -119,14 +121,16 @@ flowchart TB
 | `evals/cases.py` | Finds, parses and validates JSONL cases (JSON Schema plus cross-field and cross-file rules), and fills `{{caller.*}}` placeholders |
 | `evals/auth.py` | Entra tokens from `az login`, cached per scope and refreshed 5 minutes before expiry; the signed-in user's claims for placeholders |
 | `evals/toolbox_errors.py` | Recognizes toolbox errors caused by a tool source (consent needed, or the source failed) and prints consent links to the console, the only place they appear |
+| `evals/reasons.py` | Failure reason codes and what each means, shared by both runners and `report.py` |
 | `evals/telemetry.py` | `span()` helper and the optional App Insights exporter; does nothing without a connection string |
 | `scripts/run_assert.py` | Runs `assert-ai run` from the repo root with artifacts under `results/assert` |
-| `scripts/report.py` | Markdown reports and baseline diffs for all three result types |
+| `scripts/report.py` | Markdown reports and baseline diffs for all three result types: pass rates, failures grouped by reason, ASSERT violations with the judge's justifications and the errors of cases it couldn't score |
 | `scripts/validate_eval_jsonl.py` | Validates case files without running them |
 | `scripts/deploy_toolbox.py`, `deploy_agent.py`, `_az.py` | Create the connection (no auth, OAuth2 or UserEntraToken), toolbox version and agent version through `az rest`; for OAuth2, also the client secret and redirect URI on the client app |
 | `scripts/setup_entra.py` | Registers the Entra apps for the Entra sample through Microsoft Graph: the API app (scope, app roles, your role assignments) and the OAuth client app |
 | `sample-mcp-server/` | Synthetic MCP server, packaged as a container image: three tools, plus Entra token validation (`entra_auth.py`), region filtering and `whoami` with `AUTH_MODE=entra` |
 | `tests/` | Offline unit tests: no Azure access or `.env` needed |
+| `.github/workflows/ci.yml` | CI on pushes to `main` and pull requests: dependency check, byte-compile, case validation and unit tests on Ubuntu (Python 3.11 and 3.14) and Windows (3.14). Offline only; live runs would need Azure credentials, for example OIDC |
 
 ## 4. Cases and results
 
@@ -246,6 +250,7 @@ classDiagram
         +string category
         +bool passed
         +list~string~ failures
+        +list~string~ reasons
         +int runs
         +object outcomes
         +float latency_p50_ms
@@ -263,6 +268,7 @@ classDiagram
         +string category
         +bool passed
         +list~string~ failures
+        +list~string~ reasons
         +bool platform_abort
         +string abort_reason
         +bool history_gap
@@ -276,6 +282,8 @@ classDiagram
 ```
 
 - `outcomes` counts outcomes across repetitions.
+- `reasons` runs parallel to `failures`: `reasons[i]` is the code for `failures[i]`, described in `evals/reasons.py`.
+  Reports group failures by it, and spans carry the distinct codes as `eval.reasons`.
 - `latency_ms` and `attempts` are null when a turn raised.
 - `abort_reason` is `tool_error`, `consent_required` or `tool_listing_failed` when `platform_abort` is true.
 - `report.py` matches results to a baseline by `case_id`, or by conversation and turn.
@@ -356,6 +364,9 @@ Assertions run only on the expected outcome, so they can check error text as wel
 - `consent_required`, `upstream_error`, `invalid_result`, `transport_error` and `runner_error` always fail.
 - A case passes when every repetition passes and none exceeds `max_latency_ms`.
 - The results record p50 and p95 latency across repetitions.
+- Each failure records a reason: the unexpected outcome, `unexpected_success` (an expected error didn't happen),
+  `assertion` or `latency`. Listing and auth cases add `missing_tool`, `duplicate_tool`, `tool_definition` and
+  `auth_status`, and cases left unrun after a lost session get `not_run`.
 
 ### Session lifecycle
 
@@ -455,16 +466,16 @@ tries the turn needed.
 
 ### Scoring a turn
 
-| Check | Applies when | Rule |
-| --- | --- | --- |
-| `expected_tool_calls` | `pass_criteria` is `tool_called_correctly` or `both` | See the matching rules below |
-| `must_not_call` | always | None of these tools was called |
-| `expected_response_pattern` | `pass_criteria` is `response_matches` or `both` | Case-insensitive regex search over the whole reply |
-| `response_must_not_match` | always | The reply does not match |
-| `max_latency_ms` | always, if set | Latency of the final HTTP attempt |
+| Check | Applies when | Rule | Failure reason |
+| --- | --- | --- | --- |
+| `expected_tool_calls` | `pass_criteria` is `tool_called_correctly` or `both` | See the matching rules below | `missing_call`, `wrong_arguments` or `wrong_order` |
+| `must_not_call` | always | None of these tools was called | `forbidden_call` |
+| `expected_response_pattern` | `pass_criteria` is `response_matches` or `both` | Case-insensitive regex search over the whole reply | `response_mismatch` |
+| `response_must_not_match` | always | The reply does not match | `forbidden_response` |
+| `max_latency_ms` | always, if set | Latency of the final HTTP attempt | `latency` |
 
-A turn the agent never ran (`abort_reason` `consent_required` or `tool_listing_failed`) fails with its note, and no other
-check runs.
+A turn the agent never ran (`abort_reason` `consent_required` or `tool_listing_failed`) fails with its note and the abort
+reason as its failure reason, and no other check runs. A turn whose request raised fails with `runner_error`.
 
 How `expected_tool_calls` are matched:
 
@@ -473,6 +484,8 @@ How `expected_tool_calls` are matched:
 - Extra params and extra calls are allowed.
 - With `ordered`, the matches must occur in order.
 - A platform-aborted call matches on name only, because its arguments are unknown.
+- An unmatched expected call fails as `wrong_order` when a matching call was made out of order, as `wrong_arguments` when
+  the tool was called but with other arguments (the message lists them), and as `missing_call` otherwise.
 
 ### Multi-turn conversations
 
@@ -538,6 +551,9 @@ results/assert/results/<suite>/
     scores.jsonl, metrics.json         judge verdicts and metrics
     manifest.json, config.yaml         stage status and the resolved config
 ```
+
+`report.py assert` reads `scores.jsonl` for the violation rate per dimension and the judge's justification for each
+violation, and `inference_set.jsonl` for the target error behind each case the judge couldn't score.
 
 ### How the judge sees tool calls
 
@@ -767,6 +783,7 @@ Deploy steps and current findings: [getting-started.md](getting-started.md) and 
 | Add agent scenarios | A JSONL file under `data/agent-evals/` |
 | Add an ASSERT behavior | A new config in `evals/configs/` (one behavior per config), run with `scripts/run_assert.py` |
 | Add an assertion type | `$defs.assertion` in `schemas/tool-test.schema.json`, `ASSERTION_FIELDS` in `evals/cases.py`, `check()` in `tooltests/run.py`, plus unit tests |
+| Add a failure reason | `Failure("code", message)` in the runner, and the code's meaning in `TOOL_REASONS` or `AGENT_REASONS` in `evals/reasons.py`; `tests/test_reasons.py` fails on undescribed codes |
 | Add a span attribute | `telemetry.span(...)` calls in the runners; document it in [telemetry.md](telemetry.md) |
 | Test a toolbox that passes the user's identity | [entra.md](entra.md): consent once, then allowed and denied cases that use `{{caller.*}}` placeholders |
 | Add a caller placeholder | `CALLER_FIELDS` in `evals/cases.py` and `auth.caller_claims`, plus unit tests |

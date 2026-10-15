@@ -13,7 +13,8 @@ error such as an unknown tool), consent_required (the signed-in user has not yet
 source's OAuth connection), upstream_error (the toolbox could not reach or authenticate to a tool
 source), invalid_result (a result that breaks the tool's output schema), transport_error (HTTP or network
 failure, or timeout) or runner_error. A case passes when every run has the expected outcome and passes
-its assertions; assertions only run on the expected outcome.
+its assertions; assertions only run on the expected outcome. Each failure message is recorded with a reason
+code (evals/reasons.py) so reports can say why cases failed.
 
 Cases may use {{caller.oid}}, {{caller.tid}}, {{caller.name}} and {{caller.username}}, filled from the
 signed-in user's token. Consent links are printed to the console only, never saved.
@@ -53,6 +54,7 @@ from pydantic import ValidationError
 
 from evals import __version__, auth, telemetry, toolbox_errors
 from evals.cases import ROOT, CaseError, fill_caller, format_error, load_cases, schema_validator
+from evals.reasons import Failure, summary_line
 
 CLIENT_INFO = Implementation(name="foundry-toolbox-tests", version=__version__)
 AUTH_PROBE_PROTOCOL = "2025-11-25"
@@ -351,15 +353,17 @@ def explain(error: BaseException, http_errors: HttpErrors) -> str:
 
 # ---- cases -------------------------------------------------------------------------------------
 
-def summarize(case: dict, runs: list[tuple[Outcome, list[str]]], extra: list[str] = ()) -> dict:
+def summarize(case: dict, runs: list[tuple[Outcome, list[Failure]]], extra: list[Failure] = ()) -> dict:
     kind = case.get("kind", "call")
     n = len(runs)
     counts = Counter(f for _, failures in runs for f in dict.fromkeys(failures))
-    failures = [f if n == 1 else f"{f} ({c}/{n} runs)" for f, c in counts.items()] + list(extra)
+    found = [f if n == 1 else f._replace(message=f"{f.message} ({c}/{n} runs)") for f, c in counts.items()]
+    found += extra
     lats = sorted(o.latency_ms for o, _ in runs if o.latency_ms is not None)
     return {
         "case_id": case["case_id"], "kind": kind, "tool": case.get("tool") or kind,
-        "category": case["category"], "passed": not failures, "failures": failures,
+        "category": case["category"], "passed": not found,
+        "failures": [f.message for f in found], "reasons": [f.reason for f in found],
         "runs": n, "outcomes": dict(Counter(o.outcome for o, _ in runs)),
         "latency_p50_ms": round(statistics.median(lats), 1) if lats else None,
         "latency_p95_ms": round(lats[math.ceil(0.95 * len(lats)) - 1], 1) if lats else None,
@@ -367,11 +371,11 @@ def summarize(case: dict, runs: list[tuple[Outcome, list[str]]], extra: list[str
     }
 
 
-def error_result(case: dict, outcome: str, message: str) -> dict:
-    return summarize(case, [(Outcome(outcome, message), [message])])
+def error_result(case: dict, outcome: str, message: str, reason: str | None = None) -> dict:
+    return summarize(case, [(Outcome(outcome, message), [Failure(reason or outcome, message)])])
 
 
-def latency_failures(case: dict, outcomes: list[Outcome], expected: str = "ok") -> list[str]:
+def latency_failures(case: dict, outcomes: list[Outcome], expected: str = "ok") -> list[Failure]:
     """One failure for all runs over max_latency_ms (runs with another outcome already failed)."""
     limit = case.get("max_latency_ms")
     slow = [o.latency_ms for o in outcomes
@@ -379,8 +383,8 @@ def latency_failures(case: dict, outcomes: list[Outcome], expected: str = "ok") 
     if not slow:
         return []
     if len(outcomes) == 1:
-        return [f"latency {slow[0]:.0f}ms > {limit}ms"]
-    return [f"latency > {limit}ms in {len(slow)}/{len(outcomes)} runs (max {max(slow):.0f}ms)"]
+        return [Failure("latency", f"latency {slow[0]:.0f}ms > {limit}ms")]
+    return [Failure("latency", f"latency > {limit}ms in {len(slow)}/{len(outcomes)} runs (max {max(slow):.0f}ms)")]
 
 
 async def run_call(tb: Toolbox, case: dict) -> dict:
@@ -389,9 +393,10 @@ async def run_call(tb: Toolbox, case: dict) -> dict:
     for _ in range(case.get("repetitions", 1)):
         o = await tb.call(case["tool"], case["arguments"])
         if o.outcome != expected:
-            failures = [f"expected {expected}, got {o.outcome}: {_clip(o.text)}"]
+            reason = o.outcome if o.outcome != "ok" else "unexpected_success"
+            failures = [Failure(reason, f"expected {expected}, got {o.outcome}: {_clip(o.text)}")]
         else:
-            failures = [f for a in case.get("assertions", []) if (f := check(a, o.text, o.data))]
+            failures = [Failure("assertion", f) for a in case.get("assertions", []) if (f := check(a, o.text, o.data))]
         runs.append((o, failures))
     return summarize(case, runs, latency_failures(case, [o for o, _ in runs], expected))
 
@@ -399,13 +404,13 @@ async def run_call(tb: Toolbox, case: dict) -> dict:
 async def run_list(tb: Toolbox, case: dict) -> dict:
     o = await tb.list_tools()
     if o.outcome != "ok":
-        return summarize(case, [(o, [f"tools/list failed ({o.outcome}): {_clip(o.text)}"])])
+        return summarize(case, [(o, [Failure(o.outcome, f"tools/list failed ({o.outcome}): {_clip(o.text)}")])])
     tools, failures = o.data, []
     names = [t.name for t in tools]
-    failures += [f"tool {n!r} listed {c} times" for n, c in Counter(names).items() if c > 1]
-    failures += [f"tool {n!r} not listed" for n in case["expect_tools"] if n not in names]
+    failures += [Failure("duplicate_tool", f"tool {n!r} listed {c} times") for n, c in Counter(names).items() if c > 1]
+    failures += [Failure("missing_tool", f"tool {n!r} not listed") for n in case["expect_tools"] if n not in names]
     if case.get("require_schemas"):
-        failures += [p for t in tools for p in tool_definition_problems(t)]
+        failures += [Failure("tool_definition", p) for t in tools for p in tool_definition_problems(t)]
     o.text = ", ".join(sorted(set(names)))
     return summarize(case, [(o, failures)], latency_failures(case, [o]))
 
@@ -427,9 +432,9 @@ async def run_auth(target: Target, case: dict) -> dict:
         except httpx2.HTTPError as e:
             o = Outcome("transport_error", f"{type(e).__name__}: {e}", latency_ms=_ms(start))
     if o.outcome != "ok":
-        failures = [f"request failed: {o.text}"]
+        failures = [Failure(o.outcome, f"request failed: {o.text}")]
     elif o.data != case["expect_status"]:
-        failures = [f"status {o.data}, expected {case['expect_status']}"]
+        failures = [Failure("auth_status", f"status {o.data}, expected {case['expect_status']}")]
     else:
         failures = []
     return summarize(case, [(o, failures)])
@@ -457,6 +462,7 @@ async def run_case(tb: Toolbox, case: dict) -> dict:
         if result["latency_p50_ms"] is not None:
             sp.set_attribute("eval.latency_p50_ms", result["latency_p50_ms"])
         sp.set_attribute("eval.failures", "; ".join(result["failures"]))
+        sp.set_attribute("eval.reasons", ",".join(sorted(set(result["reasons"]))))
         return result
 
 
@@ -489,7 +495,8 @@ async def run_all(cases: list[dict], target: Target) -> tuple[list[dict], dict]:
                 results.append(error_result(pending.pop(0), "transport_error", f"session lost: {reason}"))
             reconnects += 1
             if reconnects > MAX_RECONNECTS:
-                results += [error_result(c, "transport_error", f"not run: session lost ({reason})") for c in pending]
+                results += [error_result(c, "transport_error", f"not run: session lost ({reason})", "not_run")
+                            for c in pending]
                 break
             print(f"session lost ({reason}); reconnecting ({reconnects}/{MAX_RECONNECTS})", file=sys.stderr)
             await asyncio.sleep(RECONNECT_BACKOFF_S * 2 ** (reconnects - 1))
@@ -566,6 +573,8 @@ def main(argv: list[str] | None = None) -> int:
             print(f"       - {f}")
     passed = sum(r["passed"] for r in results)
     print(f"\n{passed}/{len(results)} passed")
+    if why := summary_line(results):
+        print(why)
 
     args.out.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")

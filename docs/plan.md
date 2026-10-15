@@ -28,7 +28,11 @@ Checks: expected tool calls (+ param matching), `must_not_call`, response regex 
   config). Exact tool-call checks run via `python -m evals.run_agent_evals data/agent-evals/sample-toolbox.jsonl` (expected
   calls + params, ordered, `must_not_call`, response regex, latency; multi-turn by `conversation_id`). ASSERT does not
   assert specific call parameters, so the two complement each other.
-- Reports (`scripts/report.py`, baseline diffs) and App Insights telemetry (`docs/telemetry.md`): done.
+- Reports (`scripts/report.py`: baseline diffs, failures grouped by reason, ASSERT violations with the judge's
+  justifications) and App Insights telemetry (`docs/telemetry.md`): done. Every failure carries a reason code
+  (`evals/reasons.py`) in the result files and spans.
+- CI: done. `.github/workflows/ci.yml` runs the offline checks (install, compile, case validation, unit tests) on Ubuntu
+  with Python 3.11 and 3.14 and on Windows with 3.14; no Azure access.
 - Per-user Entra identity: done ([entra.md](entra.md)). An Entra-protected sample server (`AUTH_MODE=entra`, region
   filtering by app role) behind an OAuth2 identity-passthrough connection; `{{caller.*}}` placeholders; the tool-test
   outcomes `consent_required` and `upstream_error`; and agent abort reasons for turns the agent never ran. `UserEntraToken`
@@ -46,7 +50,7 @@ Checks: expected tool calls (+ param matching), `must_not_call`, response regex 
 2. Tool-test runner (MCP client, latency stats, JSON results) - done
 3. Agent-level runner (Responses API with `agent_reference`; tool calls read from `mcp_call` output items) - done
 4. Scoring + report (pass rate by category, latency, diff vs. baseline) - done
-5. LLM judge (ASSERT) and Application Insights tracing - done; CI workflow - open
+5. LLM judge (ASSERT), Application Insights tracing and CI workflow - done
 
 ## Decisions
 
@@ -61,10 +65,11 @@ Checks: expected tool calls (+ param matching), `must_not_call`, response regex 
 ## Next
 
 - Read MCP `structuredContent` and validate it against each tool's `outputSchema`; return typed results from the sample tools.
-- Agent scoring: penalize extra calls, pass@k over repetitions, count platform aborts in reports.
+- Agent scoring: penalize extra calls, pass@k over repetitions.
 - Multi-turn fidelity (`previous_response_id` or Foundry conversations instead of text replay) and per-run provenance
   (agent version, model, toolbox version, token usage).
-- CI workflow; Foundry cloud evaluation as a server-side alternative.
+- Live runs in CI (an OIDC federated credential and a test project); Foundry cloud evaluation as a server-side
+  alternative.
 - Identity: several test identities in one run (a role matrix, each case tagged with the identity it expects); hosted
   agents, which forward `x-agent-foundry-call-id` to the toolbox; recheck `UserEntraToken` for custom audiences; confirm
   consent survives the connection's refresh-token expiry.

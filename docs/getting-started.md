@@ -96,7 +96,7 @@ To test a different toolbox endpoint, pass `--endpoint <url>`, or copy `config\t
 .\.venv\Scripts\python scripts\run_assert.py evals\configs\ungrounded_figures.yaml
 .\.venv\Scripts\python scripts\run_assert.py evals\configs\tool_error_handling.yaml
 
-# Reports (markdown); add --baseline <older run> to diff
+# Reports (markdown): pass rates, why cases failed; add --baseline <older run> to diff
 .\.venv\Scripts\python scripts\report.py tool
 .\.venv\Scripts\python scripts\report.py agent
 .\.venv\Scripts\python scripts\report.py assert results\assert\results\<suite>\<run>
@@ -107,7 +107,9 @@ aborts the request; see Troubleshooting) and still passes: the abort message nam
 the name alone (the arguments are unknown). ASSERT results are not fixed; the first baseline found real violations
 (e.g. manufacturing data applied to aerospace).
 
-Both runners exit 0 when everything passes, 1 when a case fails, and 2 on invalid cases or a setup error.
+Both runners exit 0 when everything passes, 1 when a case fails, and 2 on invalid cases or a setup error. A run with
+failures ends with a line such as `Failed by reason: tool_error 3, assertion 3, missing_tool 1`; the report lists each
+failure under its reason.
 
 Add telemetry with [telemetry.md](telemetry.md).
 

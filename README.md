@@ -28,12 +28,14 @@ Docs: [getting started](docs/getting-started.md) (deploy and run the samples), [
 | `deploy/` | Notes and findings for the deployed sample toolbox |
 | `docs/` | Setup guides, architecture, telemetry, plan |
 | `tests/` | Offline unit tests |
+| `.github/workflows/` | CI: the offline checks on Ubuntu and Windows |
 | `results/` | Run output (git-ignored) |
 
 ## Status
 
-Working: sample MCP server, tool-test runner, deterministic agent-eval runner, ASSERT behavior configs, reports, App Insights
-telemetry, and per-user Entra identity through OAuth2 identity passthrough ([docs/entra.md](docs/entra.md)).
+Working: sample MCP server, tool-test runner, deterministic agent-eval runner, ASSERT behavior configs, reports that show
+why cases failed, App Insights telemetry, offline CI, and per-user Entra identity through OAuth2 identity passthrough
+([docs/entra.md](docs/entra.md)).
 
 ## Setup
 
@@ -62,6 +64,8 @@ Each call ends in one outcome (`ok`, `tool_error`, `protocol_error`, `consent_re
 contains, regex, json_path_equals, json_path_exists, schema; plus `max_latency_ms` and `repetitions`.
 `consent_required` (the signed-in user hasn't consented to a tool source's OAuth connection) and `upstream_error` (the
 toolbox couldn't reach or authenticate to a tool source) always fail; consent links go to the console only.
+Failure reasons: the unexpected outcome (for example `tool_error`), `unexpected_success`, `assertion`, `latency`, a listing
+problem (`missing_tool`, `duplicate_tool`, `tool_definition`), `auth_status` or `not_run`.
 
 Cases can check the caller's identity with `{{caller.oid}}`, `{{caller.tid}}`, `{{caller.name}}` and
 `{{caller.username}}`, filled from the signed-in user's token (both runners; see [docs/entra.md](docs/entra.md)).
@@ -79,9 +83,13 @@ Each result records `tool_calls`, `response`, `latency_ms` (null when the call f
 retries), `platform_abort` with its `abort_reason`, and `history_gap`: an earlier turn got no answer (error or abort), so
 this turn's history lacks that reply. Abort reasons: `tool_error` (a tool error aborted the request; the turn is still
 scored), and `consent_required` or `tool_listing_failed` (the agent never ran, so the turn fails).
+Failure reasons: `missing_call`, `wrong_arguments`, `wrong_order`, `forbidden_call`, `response_mismatch`,
+`forbidden_response`, `latency`, `runner_error` (no reply), or the abort reason of a turn the agent never ran.
 
 Both runners validate their cases first and exit 0 when everything passes, 1 when a case fails, and 2 on invalid cases or a
-setup error (config, sign-in, consent, connection). Validate case files without running them:
+setup error (config, sign-in, consent, connection). Each result keeps `failures` (messages) and a parallel `reasons` list
+with one code per message (all codes are described in `evals\reasons.py`), and the console ends with the number of failed
+cases per reason. Validate case files without running them:
 
 ```powershell
 .\.venv\Scripts\python scripts\validate_eval_jsonl.py "data\tool-tests\*.jsonl" "data\agent-evals\*.jsonl"
@@ -112,8 +120,18 @@ Early findings: the agent applied "manufacturing" market data to aerospace, and 
 .\.venv\Scripts\python scripts\report.py assert results\assert\results\<suite>\<run> [--baseline <other run dir>] [--out report.md]
 ```
 
-## Unit tests
+Tool and agent reports show pass rates by category, latency, platform aborts, a *Why cases failed* table (failed cases
+per reason) and each failure grouped by reason; regressions against a baseline list their reasons. Runs recorded before
+reasons existed show `unrecorded`. The ASSERT report adds each violation with the judge's justification per dimension, and
+the error for each case it couldn't score (for example the Responses API's error code and message).
+
+## Unit tests and CI
 
 ```powershell
 .\.venv\Scripts\python -m unittest discover -s tests   # offline: sample server, runners, scoring, validation
 ```
+
+GitHub Actions (`.github\workflows\ci.yml`) runs the offline checks on pushes to `main`, pull requests and manual runs:
+dependency install and `pip check`, a byte-compile of every source file, case validation and the unit tests, on Ubuntu
+with Python 3.11 and 3.14 and on Windows with 3.14. Changes that touch only docs or Markdown skip it. CI has no Azure
+credentials and calls nothing live.
