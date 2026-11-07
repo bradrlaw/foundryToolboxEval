@@ -38,8 +38,8 @@ and `repetitions`. Cover happy path, not-found/invalid input (`expect_error: tru
 `"protocol"` for a JSON-RPC error), schema conformance, auth failures.
 
 Agent evals (`data\agent-evals\*.jsonl`, `schemas\agent-eval.schema.json`): each turn gives the prompt, expected tool calls
-(name and argument checks), `must_not_call` (always enforced) and answer assertions; turns with the same
-`conversation_id` run as one conversation.
+(name and argument checks), `must_not_call` and `max_tool_calls` (both always enforced) and answer assertions; turns with
+the same `conversation_id` run as one conversation. Add `--repetitions 3` to the agent runner to see which turns are flaky.
 
 ```powershell
 .\.venv\Scripts\python scripts\validate_eval_jsonl.py data\tool-tests\mine.jsonl   # kind comes from the folder or first record; --kind overrides

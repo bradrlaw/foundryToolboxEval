@@ -2,8 +2,10 @@
 
 Tool and agent reports say why cases failed: failures grouped by the reason code the runners record with each
 failure (evals/reasons.py). They also say what the run ran against (agent version and model, toolbox versions,
-commit) and, against a baseline, what of that changed. ASSERT reports list each violation with the judge's
-justification, and the cases that weren't scored with the target's error.
+commit) and, against a baseline, what of that changed. Agent runs repeated with --repetitions count a turn as passed
+only if every run passed, and add pass@1, pass@k and pass^k and the flaky turns. Agent reports also count the tool
+calls beyond those each turn expects. ASSERT reports list each violation with the judge's justification, and the
+cases that weren't scored with the target's error.
 
 Usage:
   python scripts/report.py tool   [RUN.json] [--baseline RUN.json]
@@ -16,10 +18,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import statistics
 from collections import Counter, defaultdict
 from pathlib import Path
 
 from evals.reasons import AGENT_REASONS, TOOL_REASONS
+from evals.results import by_case, extra_calls_by_case, pass_rate_text, pass_rates, result_id
 
 ROOT = Path(__file__).resolve().parent.parent
 UNRECORDED = "unrecorded"
@@ -28,12 +32,24 @@ TARGET_ERROR = "[TARGET ERROR:"
 MAX_TEXT = 300
 
 
-def _id(r: dict) -> str:
-    return r.get("case_id") or f"{r['conversation_id']}#{r['turn_number']}"
-
-
 def _latency(r: dict) -> float | None:
     return r.get("latency_p50_ms", r.get("latency_ms"))
+
+
+def per_case(results: list[dict]) -> list[dict]:
+    """One result per case. A case that ran several times passes only if every run passed; it keeps each distinct
+    failure once, and its latency is the median over its runs. A case that ran once keeps its result."""
+    out = []
+    for runs in by_case(results).values():
+        if len(runs) == 1:
+            out.append(runs[0])
+            continue
+        pairs = list(dict.fromkeys(pair for r in runs for pair in failure_reasons(r)))
+        lats = [x for x in map(_latency, runs) if x is not None]
+        out.append({**runs[0], "passed": all(r["passed"] for r in runs), "failures": [m for _, m in pairs],
+                    "reasons": [k for k, _ in pairs],
+                    "latency_p50_ms": round(statistics.median(lats), 1) if lats else None})
+    return out
 
 
 def by_category(results: list[dict]) -> dict[str, tuple[int, int]]:
@@ -45,8 +61,8 @@ def by_category(results: list[dict]) -> dict[str, tuple[int, int]]:
 
 
 def diff_cases(current: list[dict], baseline: list[dict], latency_tolerance: float = 0.25) -> dict[str, list]:
-    base = {_id(r): r for r in baseline}
-    cur = {_id(r): r for r in current}
+    base = {result_id(r): r for r in baseline}
+    cur = {result_id(r): r for r in current}
     d: dict[str, list] = {"regressions": [], "fixes": [], "new": [], "removed": [], "slower": []}
     for cid, r in cur.items():
         b = base.get(cid)
@@ -77,7 +93,7 @@ def failure_reasons(r: dict) -> list[tuple[str, str]]:
 
 
 def _case_count(items: list[tuple[dict, str]]) -> int:
-    return len({_id(r) for r, _ in items})
+    return len({result_id(r) for r, _ in items})
 
 
 def by_reason(results: list[dict]) -> dict[str, list[tuple[dict, str]]]:
@@ -100,19 +116,27 @@ def _flags(r: dict, reason: str) -> str:
 
 
 def why_failed(results: list[dict], meanings: dict[str, str]) -> list[str]:
-    """A reason summary table, then each failure under its reason."""
+    """A reason summary table, then each failure under its reason. A failure that recurs over a case's runs is
+    listed once, with the number of runs it occurred in."""
     groups = by_reason(results)
     if not groups:
         return []
+    runs = Counter(result_id(r) for r in results)
     meanings = {**meanings, UNRECORDED: UNRECORDED_MEANING}
     lines = ["", "## Why cases failed", "", "| Reason | Failed cases | Meaning |", "| --- | ---: | --- |"]
     lines += [f"| `{k}` | {_case_count(v)} | {meanings.get(k, '')} |" for k, v in groups.items()]
     lines += ["", "## Failures by reason"]
     for reason, items in groups.items():
         lines += ["", f"### `{reason}`", ""]
+        nth: Counter = Counter()  # the same message twice in one result stays two lines
+        merged: dict[tuple, list[dict]] = {}
         for r, message in items:
-            tool = f" {r['tool']}" if r.get("tool") else ""
-            lines.append(f"- `{_id(r)}`{tool}{_flags(r, reason)}: {message}")
+            nth[(id(r), message)] += 1
+            merged.setdefault((result_id(r), _flags(r, reason), message, nth[(id(r), message)]), []).append(r)
+        for (cid, flags, message, _), found in merged.items():
+            tool = f" {found[0]['tool']}" if found[0].get("tool") else ""
+            share = f" [{len(found)}/{runs[cid]} runs]" if runs[cid] > 1 else ""
+            lines.append(f"- `{cid}`{tool}{flags}{share}: {message}")
     return lines
 
 
@@ -158,18 +182,31 @@ def provenance_changes(current: dict, baseline: dict) -> list[str]:
 
 def case_report(title: str, current: dict, baseline: dict | None, meanings: dict[str, str] | None = None) -> str:
     res = current["results"]
-    passed = sum(r["passed"] for r in res)
-    lines = [f"# {title}", "", f"Run `{current.get('timestamp', '?')}`: **{passed}/{len(res)} passed**", ""]
+    cases = per_case(res)
+    passed = sum(r["passed"] for r in cases)
+    rates = pass_rates(res)
+    run = f"Run `{current.get('timestamp', '?')}`"
+    if rates:
+        flaky = ", ".join(f"`{c}` {p}/{n}" for c, p, n in rates["flaky"]) or "none"
+        lines = [f"# {title}", "", f"{run}, {rates['k']} runs of each case: **{passed}/{len(cases)} passed every run**",
+                 "", f"{pass_rate_text(rates)} ({sum(r['passed'] for r in res)}/{len(res)} runs passed). "
+                     f"Flaky (passed some runs, not all): {flaky}.", ""]
+    else:
+        lines = [f"# {title}", "", f"{run}: **{passed}/{len(cases)} passed**", ""]
     if ran := ran_against(current):
         lines += ["Ran against " + ", ".join(f"{k} {_known(v)}" for k, v in ran.items()) + ".", ""]
     lines += ["| Category | Passed | Total |", "| --- | ---: | ---: |"]
-    lines += [f"| {c} | {p} | {t} |" for c, (p, t) in by_category(res).items()]
-    lats = sorted(x for x in (_latency(r) for r in res) if x)
+    lines += [f"| {c} | {p} | {t} |" for c, (p, t) in by_category(cases).items()]
+    lats = sorted(x for x in (_latency(r) for r in cases) if x)
     if lats:
         lines += ["", f"Latency (per-case p50): median {lats[len(lats) // 2]:.0f} ms, max {lats[-1]:.0f} ms"]
     if usage := current.get("usage"):
         lines += ["", f"Tokens: {usage.get('total_tokens') or 0:,} ({usage.get('input_tokens') or 0:,} input, "
                       f"{usage.get('output_tokens') or 0:,} output)"]
+    if any(r.get("extra_calls") is not None for r in res):
+        extra = extra_calls_by_case(res)
+        detail = f"{sum(extra.values())} ({', '.join(f'`{c}` {n}' for c, n in extra.items())})" if extra else "none"
+        lines += ["", f"Extra tool calls (beyond those expected{', over all runs' if rates else ''}): {detail}"]
     aborts = [r for r in res if r.get("platform_abort")]
     gaps = sum(bool(r.get("history_gap")) for r in res)
     if aborts or gaps:
@@ -178,8 +215,8 @@ def case_report(title: str, current: dict, baseline: dict | None, meanings: dict
         lines += ["", f"Platform aborts: {len(aborts)}{detail}. Turns with a history gap: {gaps}."]
     lines += why_failed(res, meanings or {})
     if baseline:
-        d = diff_cases(res, baseline["results"])
-        cur = {_id(r): r for r in res}
+        d = diff_cases(cases, per_case(baseline["results"]))
+        cur = {result_id(r): r for r in cases}
         regressions = [f"`{c}` ({', '.join(dict.fromkeys(k for k, _ in failure_reasons(cur[c])))})"
                        for c in d["regressions"]]
         lines += ["", f"## Vs. baseline `{baseline.get('timestamp', '?')}`", ""]

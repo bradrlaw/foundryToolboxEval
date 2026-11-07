@@ -9,6 +9,8 @@ from __future__ import annotations
 from collections import Counter
 from typing import NamedTuple
 
+from evals.results import result_id
+
 
 class Failure(NamedTuple):
     reason: str
@@ -42,6 +44,7 @@ AGENT_REASONS = {
     "wrong_arguments": "The expected tool was called, but never with the expected arguments.",
     "wrong_order": "The expected calls were made, but not in the expected order.",
     "forbidden_call": "A tool listed in must_not_call was called.",
+    "extra_calls": "The turn made more tool calls than the case's max_tool_calls allows.",
     "response_mismatch": "The reply doesn't match expected_response_pattern.",
     "forbidden_response": "The reply matches response_must_not_match.",
     "latency": "Slower than the case's max_latency_ms.",
@@ -50,8 +53,9 @@ AGENT_REASONS = {
 
 
 def tally(results: list[dict]) -> Counter:
-    """Failed cases per reason; a case counts once for each of its reasons."""
-    return Counter(reason for r in results for reason in dict.fromkeys(r.get("reasons") or ()))
+    """Failed cases per reason; a case counts once for each of its reasons, however many of its runs failed."""
+    failed = dict.fromkeys((result_id(r), reason) for r in results for reason in r.get("reasons") or ())
+    return Counter(reason for _, reason in failed)
 
 
 def summary_line(results: list[dict]) -> str:

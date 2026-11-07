@@ -5,15 +5,20 @@ Complements ASSERT, which judges behavior but does not check exact tool calls or
 Usage:
   python -m evals.run_agent_evals data/agent-evals/sample-toolbox.jsonl
   python -m evals.run_agent_evals data/agent-evals/sample-toolbox-entra.jsonl --agent customer-assistant-oauth
+  python -m evals.run_agent_evals data/agent-evals/sample-toolbox.jsonl --repetitions 3
 Results are written to results/agent-evals/run-<UTC timestamp>.json, with what the run ran against (commit,
 agent version and model, toolbox versions; evals/provenance.py) and its token totals.
+
+--repetitions N runs every conversation N times, each from a fresh history, to measure how consistent the agent is:
+a turn passes only if every run passes (pass^N), and the console adds pass@1, pass@N and pass^N and the flaky turns.
+Each turn also records `extra_calls`, its tool calls beyond those it expects; `max_tool_calls` makes too many fail.
 
 Cases may use {{caller.oid}}, {{caller.tid}}, {{caller.name}} and {{caller.username}}, filled from the
 signed-in user's token. A turn the agent could not run at all (consent_required, tool_listing_failed)
 fails with that reason; consent links are printed to the console only, never saved. Each failure message
 is recorded with a reason code (evals/reasons.py) so reports can say why turns failed.
 
-Exit codes: 0 all turns passed, 1 some failed, 2 setup error (invalid cases, missing endpoint or sign-in).
+Exit codes: 0 all turns passed (every run), 1 some failed, 2 setup error (invalid cases, missing endpoint or sign-in).
 """
 from __future__ import annotations
 
@@ -29,7 +34,7 @@ from dotenv import load_dotenv
 from evals import auth, provenance, telemetry
 from evals.cases import ROOT, CaseError, fill_caller, json_equal, load_cases
 from evals.reasons import Failure, summary_line
-from evals.results import write_run
+from evals.results import by_case, extra_calls_by_case, pass_rate_text, pass_rates, write_run
 from evals.toolbox_errors import AGENT_NOT_RUN
 
 MAX_MESSAGE = 300
@@ -76,6 +81,10 @@ def _pair_unordered(expected: list[dict], calls: list[dict]) -> dict[int, int]:
     return {e: i for i, e in owner.items()}
 
 
+def _clip(message: str) -> str:
+    return message if len(message) <= MAX_MESSAGE else message[:MAX_MESSAGE - 3] + "..."
+
+
 def _missed(expected: dict, calls: list[dict], used: set[int]) -> Failure:
     """Why no call matched an expected call. `used` holds calls that other expected calls already took."""
     what = f"expected call {expected['tool']} {expected.get('params', {})}"
@@ -84,8 +93,7 @@ def _missed(expected: dict, calls: list[dict], used: set[int]) -> Failure:
     args = [c["arguments"] for i, c in enumerate(calls) if i not in used and c["name"] == expected["tool"]]
     if not args:
         return Failure("missing_call", f"{what} not made")
-    message = f"{what} not made; {expected['tool']} was called with {'; '.join(map(str, args))}"
-    return Failure("wrong_arguments", message if len(message) <= MAX_MESSAGE else message[:MAX_MESSAGE - 3] + "...")
+    return Failure("wrong_arguments", _clip(f"{what} not made; {expected['tool']} was called with {'; '.join(map(str, args))}"))
 
 
 def score_turn(case: dict, result: dict) -> list[Failure]:
@@ -118,6 +126,10 @@ def score_turn(case: dict, result: dict) -> list[Failure]:
     for name in case.get("must_not_call", []):
         if any(c["name"] == name for c in calls):
             failures.append(Failure("forbidden_call", f"forbidden tool {name} was called"))
+    if (limit := case.get("max_tool_calls")) is not None and len(calls) > limit:
+        made = f"{len(calls)} tool call{'s' if len(calls) > 1 else ''}"
+        failures.append(Failure("extra_calls", _clip(f"{made}, max_tool_calls is {limit}: "
+                                                     + ", ".join(c["name"] for c in calls))))
 
     if criteria in ("response_matches", "both") and not result.get("platform_abort"):
         pattern = case.get("expected_response_pattern")
@@ -132,9 +144,19 @@ def score_turn(case: dict, result: dict) -> list[Failure]:
     return failures
 
 
-def run_conversations(cases: list[dict], agent) -> list[dict]:
+def extra_calls(case: dict, result: dict | None) -> int | None:
+    """Tool calls beyond the number the turn expects. None when the turn doesn't check its calls (pass_criteria
+    response_matches) or no calls are known (the request raised, or the agent never ran)."""
+    if result is None or result.get("abort_reason") in AGENT_NOT_RUN or case["pass_criteria"] == "response_matches":
+        return None
+    return max(0, len(result["tool_calls"]) - len(case["expected_tool_calls"]))
+
+
+def run_conversations(cases: list[dict], agent, repetitions: int = 1) -> list[dict]:
     """Run each conversation's turns in order, sending the accumulated history to `agent`.
 
+    With `repetitions`, every conversation runs that many times, each from a fresh history: all conversations
+    once, then all of them again, so a brief platform problem doesn't fail every run of one conversation.
     A turn the agent never answered (runner error or platform abort) keeps its user message in the
     history but adds no assistant message, and later turns in that conversation report history_gap.
     """
@@ -142,41 +164,52 @@ def run_conversations(cases: list[dict], agent) -> list[dict]:
     for c in cases:
         convs.setdefault(c["conversation_id"], []).append(c)
     results = []
-    for conv_id, turns in convs.items():
-        history: list[dict[str, str]] = []
-        gap = False
-        for case in sorted(turns, key=lambda t: t["turn_number"]):
-            history.append({"role": "user", "content": case["user_message"]})
-            res = None
-            with telemetry.span("eval.turn", **{
-                "eval.kind": "agent", "eval.conversation_id": conv_id,
-                "eval.turn_number": case["turn_number"], "eval.category": case["category"],
-            }) as sp:
-                try:
-                    res = agent(list(history))
-                    found = score_turn(case, res)
-                except Exception as e:  # a transport failure should fail the turn, not the run
-                    found = [Failure("runner_error", f"runner error: {type(e).__name__}: {e}")]
-                failures, reasons = [f.message for f in found], [f.reason for f in found]
-                sp.set_attribute("eval.passed", not found)
-                sp.set_attribute("eval.failures", "; ".join(failures))
-                sp.set_attribute("eval.reasons", ",".join(sorted(set(reasons))))
-            results.append({
-                "conversation_id": conv_id, "turn_number": case["turn_number"], "category": case["category"],
-                "passed": not found, "failures": failures, "reasons": reasons,
-                "platform_abort": bool(res and res["platform_abort"]),
-                "abort_reason": res.get("abort_reason") if res else None, "history_gap": gap,
-                "latency_ms": _round(res["latency_ms"]) if res else None,
-                "elapsed_ms": _round(res.get("elapsed_ms")) if res else None,
-                "attempts": res.get("attempts") if res else None,
-                **{k: res.get(k) if res else None for k in SERVED},
-                "tool_calls": [{"name": c["name"], "arguments": c["arguments"]} for c in res["tool_calls"]] if res else [],
-                "response": res["text"][:500] if res else "",
-            })
-            if res is None or res["platform_abort"]:
-                gap = True
-            else:
-                history.append({"role": "assistant", "content": res["text"]})
+    for repetition in range(1, repetitions + 1):
+        for conv_id, turns in convs.items():
+            results += _run_conversation(conv_id, sorted(turns, key=lambda t: t["turn_number"]), agent, repetition)
+    return results
+
+
+def _run_conversation(conv_id: str, turns: list[dict], agent, repetition: int) -> list[dict]:
+    results = []
+    history: list[dict[str, str]] = []
+    gap = False
+    for case in turns:
+        history.append({"role": "user", "content": case["user_message"]})
+        res = None
+        with telemetry.span("eval.turn", **{
+            "eval.kind": "agent", "eval.conversation_id": conv_id, "eval.turn_number": case["turn_number"],
+            "eval.repetition": repetition, "eval.category": case["category"],
+        }) as sp:
+            try:
+                res = agent(list(history))
+                found = score_turn(case, res)
+            except Exception as e:  # a transport failure should fail the turn, not the run
+                found = [Failure("runner_error", f"runner error: {type(e).__name__}: {e}")]
+            failures, reasons = [f.message for f in found], [f.reason for f in found]
+            extra = extra_calls(case, res)
+            sp.set_attribute("eval.passed", not found)
+            sp.set_attribute("eval.failures", "; ".join(failures))
+            sp.set_attribute("eval.reasons", ",".join(sorted(set(reasons))))
+            if extra is not None:
+                sp.set_attribute("eval.extra_calls", extra)
+        results.append({
+            "conversation_id": conv_id, "turn_number": case["turn_number"], "repetition": repetition,
+            "category": case["category"], "passed": not found, "failures": failures, "reasons": reasons,
+            "platform_abort": bool(res and res["platform_abort"]),
+            "abort_reason": res.get("abort_reason") if res else None, "history_gap": gap,
+            "latency_ms": _round(res["latency_ms"]) if res else None,
+            "elapsed_ms": _round(res.get("elapsed_ms")) if res else None,
+            "attempts": res.get("attempts") if res else None,
+            **{k: res.get(k) if res else None for k in SERVED},
+            "extra_calls": extra,
+            "tool_calls": [{"name": c["name"], "arguments": c["arguments"]} for c in res["tool_calls"]] if res else [],
+            "response": res["text"][:500] if res else "",
+        })
+        if res is None or res["platform_abort"]:
+            gap = True
+        else:
+            history.append({"role": "assistant", "content": res["text"]})
     return results
 
 
@@ -214,10 +247,42 @@ def total_usage(results: list[dict]) -> dict | None:
     return {k: sum(u.get(k) or 0 for u in used) for k in TOKENS} if used else None
 
 
+def summary(results: list[dict]) -> list[str]:
+    """The console's closing lines: how many turns passed (every run, with repetitions, and how consistently), the
+    tool calls beyond those expected, and the failed turns per reason."""
+    passed = sum(r["passed"] for r in results)
+    if rates := pass_rates(results):
+        cases = by_case(results)
+        every = sum(all(r["passed"] for r in runs) for runs in cases.values())
+        lines = [f"{every}/{len(cases)} turns passed all {rates['k']} runs ({passed}/{len(results)} runs passed)",
+                 pass_rate_text(rates),
+                 "Flaky: " + (", ".join(f"{c} {p}/{n}" for c, p, n in rates["flaky"]) or "none")]
+    else:
+        lines = [f"{passed}/{len(results)} passed"]
+    if extra := extra_calls_by_case(results):
+        lines.append(f"Extra tool calls: {sum(extra.values())} ({', '.join(f'{c} {n}' for c, n in extra.items())})")
+    if why := summary_line(results):
+        lines.append(why)
+    return lines
+
+
+def _at_least_one(text: str) -> int:
+    try:
+        n = int(text)
+    except ValueError:
+        n = 0
+    if n < 1:
+        raise argparse.ArgumentTypeError(f"must be a whole number of at least 1, not {text!r}")
+    return n
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="Run agent-eval conversations against the Foundry agent and score its tool calls.")
     ap.add_argument("cases", nargs="+", help="agent-eval JSONL files or glob patterns")
     ap.add_argument("--agent", help="agent name (default: $FOUNDRY_AGENT_NAME, else customer-assistant)")
+    ap.add_argument("--repetitions", type=_at_least_one, default=1, metavar="N",
+                    help="run every conversation N times, each from a fresh history; a turn passes only if every run "
+                         "passes (default 1)")
     ap.add_argument("--out", type=Path, default=ROOT / "results" / "agent-evals")
     args = ap.parse_args(argv)
 
@@ -248,30 +313,29 @@ def main(argv: list[str] | None = None) -> int:
     if args.agent:
         target.AGENT_NAME = args.agent
 
-    results = run_conversations(cases, target.run_agent)
-    for r in results:
-        flags = ""
-        if r["platform_abort"]:
-            flags += f" [platform abort: {r['abort_reason']}]" if r["abort_reason"] else " [platform abort]"
-        if r["history_gap"]:
-            flags += " [history gap]"
-        print(f"{'PASS' if r['passed'] else 'FAIL'} {r['conversation_id']}#{r['turn_number']} {r['category']}{flags} "
-              f"{_timing(r)}")
-        for f in r["failures"]:
-            print(f"       - {f}")
-    passed = sum(r["passed"] for r in results)
-    print(f"\n{passed}/{len(results)} passed")
-    if why := summary_line(results):
-        print(why)
+    results = run_conversations(cases, target.run_agent, args.repetitions)
+    for runs in by_case(results).values():  # a turn's runs together
+        for r in runs:
+            flags = f" [run {r['repetition']}/{args.repetitions}]" if args.repetitions > 1 else ""
+            if r["platform_abort"]:
+                flags += f" [platform abort: {r['abort_reason']}]" if r["abort_reason"] else " [platform abort]"
+            if r["history_gap"]:
+                flags += " [history gap]"
+            print(f"{'PASS' if r['passed'] else 'FAIL'} {r['conversation_id']}#{r['turn_number']} {r['category']}"
+                  f"{flags} {_timing(r)}")
+            for f in r["failures"]:
+                print(f"       - {f}")
+    print("\n" + "\n".join(summary(results)))
     if any(r["abort_reason"] == "consent_required" for r in results):
         print("Some turns did not run: the agent's OAuth tool connection needs the signed-in user's consent. "
               "Open the link printed above, approve, then rerun.", file=sys.stderr)
 
     ran = run_provenance(results, target.PROJECT_ENDPOINT, target.AGENT_NAME)
-    out = write_run(args.out, lambda stamp: {"agent": target.AGENT_NAME, "timestamp": stamp, "provenance": ran,
+    out = write_run(args.out, lambda stamp: {"agent": target.AGENT_NAME, "timestamp": stamp,
+                                             "repetitions": args.repetitions, "provenance": ran,
                                              "usage": total_usage(results), "results": results})
     print(f"results: {out}")
-    return 0 if passed == len(results) else 1
+    return 0 if all(r["passed"] for r in results) else 1
 
 
 if __name__ == "__main__":

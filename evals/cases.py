@@ -1,8 +1,9 @@
 """Load and validate tool-test and agent-eval JSONL files against the schemas in schemas/.
 
 The JSON Schemas carry the structural rules. Cross-field rules they cannot express clearly are
-checked here: fields a case's kind or pass_criteria ignores, duplicate ids, turn-number gaps, the
-regex syntax of `re:` params, and unknown {{caller.<field>}} placeholders.
+checked here: fields a case's kind or pass_criteria ignores, settings that conflict (a must_not_call tool that is also
+expected, a max_tool_calls below the expected calls), duplicate ids, turn-number gaps, the regex syntax of `re:` params,
+and unknown {{caller.<field>}} placeholders.
 
 Any string in a case may use {{caller.oid}}, {{caller.tid}}, {{caller.name}} or {{caller.username}}; the
 runners replace them with the signed-in user's values (expand_caller) so per-user cases stay portable.
@@ -126,6 +127,9 @@ def _agent_problems(case: dict) -> list[str]:
     expected = {c["tool"] for c in case["expected_tool_calls"]}
     problems += [f"$.must_not_call: {name!r} is also an expected call"
                  for name in sorted(expected & set(case.get("must_not_call", [])))]
+    limit, wanted = case.get("max_tool_calls"), len(case["expected_tool_calls"])
+    if limit is not None and criteria != "response_matches" and limit < wanted:
+        problems.append(f"$.max_tool_calls: {limit} is fewer than the {wanted} expected calls, so the turn can't pass")
     for i, call in enumerate(case["expected_tool_calls"]):
         for key, value in call["params"].items():
             if isinstance(value, str) and value.startswith("re:"):

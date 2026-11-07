@@ -97,6 +97,13 @@ class AgentCaseTests(unittest.TestCase):
         self.assertTrue(any("also an expected call" in x for x in p))
         self.assertTrue(any("invalid regex" in x for x in p))
 
+    def test_max_tool_calls_below_the_expected_calls_is_flagged(self):
+        two = [{"tool": "t", "params": {}}, {"tool": "u", "params": {}}]
+        self.assertEqual(problems_for("agent", turn(expected_tool_calls=two, max_tool_calls=2)), [])
+        p = problems_for("agent", turn(expected_tool_calls=two, max_tool_calls=1))
+        self.assertEqual(len(p), 1)
+        self.assertIn("$.max_tool_calls: 1 is fewer than the 2 expected calls, so the turn can't pass", p[0])
+
     def test_duplicate_turns_and_gaps(self):
         self.assertIn("duplicate conversation turn", problems_for("agent", turn(), turn())[0])
         self.assertIn("number them 1..2", problems_for("agent", turn(), turn(turn_number=3))[0])

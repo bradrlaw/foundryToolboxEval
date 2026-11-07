@@ -42,6 +42,9 @@ Checks: expected tool calls (+ param matching), `must_not_call`, response regex 
   agent version and model; agent turns record their response id, agent version, model, token usage and `elapsed_ms` (the
   whole request, retries included). Reports show these and what changed since the baseline, and agent spans carry the
   agent version and tokens. ASSERT runs don't record provenance yet.
+- Agent scoring: done. `--repetitions N` reruns every conversation from a fresh history; a turn passes only if every
+  run passes, and the console and reports add pass@1, pass@N, pass^N and the flaky turns. `max_tool_calls` fails a turn
+  that makes too many calls, and every turn that checks its calls records `extra_calls`, the calls beyond those expected.
 
 ## Data format (JSONL, one case per line)
 
@@ -70,7 +73,6 @@ Checks: expected tool calls (+ param matching), `must_not_call`, response regex 
 ## Next
 
 - Read MCP `structuredContent` and validate it against each tool's `outputSchema`; return typed results from the sample tools.
-- Agent scoring: penalize extra calls, pass@k over repetitions.
 - Multi-turn fidelity (`previous_response_id` or Foundry conversations instead of text replay); provenance for ASSERT
   runs.
 - Live runs in CI (an OIDC federated credential and a test project); Foundry cloud evaluation as a server-side

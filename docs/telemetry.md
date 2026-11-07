@@ -44,7 +44,7 @@ Run the runners with the venv python (it has `azure-monitor-opentelemetry-export
 | Cloud role | Spans |
 | --- | --- |
 | `foundry-toolbox-tests` | `toolbox.test_case` (`eval.case_id`, `eval.kind`, `eval.category`, `gen_ai.tool.name`, `eval.passed`, `eval.outcome`, `eval.latency_p50_ms`, `eval.failures`, `eval.reasons`), with the MCP SDK's `MCP send <method>` spans as children and the toolbox's requests under those |
-| `foundry-agent-evals` | `eval.turn` (`eval.conversation_id`, `eval.turn_number`, `eval.category`, `eval.passed`, `eval.failures`, `eval.reasons`), with the target's `foundry_agent` and `tool:*` spans as children |
+| `foundry-agent-evals` | `eval.turn` (`eval.kind`, `eval.conversation_id`, `eval.turn_number`, `eval.repetition`, `eval.category`, `eval.passed`, `eval.failures`, `eval.reasons`, `eval.extra_calls`), with the target's `foundry_agent` and `tool:*` spans as children |
 | `foundry-agent-target` | `foundry_agent` (`gen_ai.agent.name`, `gen_ai.agent.version`, `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens`, `eval.platform_abort`, `eval.abort_reason`) and `tool:*` (`gen_ai.tool.name`), when ASSERT runs the target or it runs on its own. The version and tokens are those the agent's response reports, absent when the request failed |
 | `responsesapi` (Foundry) | `invoke_agent`, `chat <model>`, `execute_tool` with real tool durations |
 | `agentsv2` (Foundry toolbox) | Requests, in `requests`: `tools/call <tool>` and `tools/list <toolbox>:<version>` (`gen_ai.tool.name`, `gen_ai.tool.call.arguments`, `microsoft.foundry.toolbox.name`, `microsoft.foundry.toolbox.version`, `error.type`, `rpc.response.status_code`). `resultCode` is `0`, or `500` when the call fails (`error.type` `tool_error` or `json_rpc_error`) |
@@ -56,7 +56,9 @@ runner, so the target's spans carry `foundry-agent-evals`.
 `upstream_error`, `invalid_result`, `transport_error`, `runner_error`), comma-separated. `eval.reasons` lists the distinct
 reason codes of a failed case or turn ([evals/reasons.py](../evals/reasons.py)), comma-separated, and is empty when it
 passed. `eval.abort_reason` is `tool_error`, `consent_required` or `tool_listing_failed` when `eval.platform_abort` is
-true ([entra.md](entra.md#failures-specific-to-identity)).
+true ([entra.md](entra.md#failures-specific-to-identity)). `eval.repetition` is the run's number under `--repetitions`
+(1 without it). `eval.extra_calls` counts the turn's tool calls beyond those it expects, and is absent when the turn
+doesn't check its calls or none are known.
 
 Consent links never appear in spans. Identity cases can put the test user's object ID, name or username into span
 attributes: agent replies in `output.value`, and failure messages with filled-in `{{caller.*}}` values in `eval.failures`.

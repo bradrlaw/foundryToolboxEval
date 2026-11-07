@@ -11,7 +11,7 @@
     "expected_tool_calls": {
       "type": "array",
       "items": {"$ref": "#/$defs/expected_call"},
-      "description": "Calls the agent must make in this turn (other calls are allowed unless listed in must_not_call). Checked when pass_criteria is tool_called_correctly or both."
+      "description": "Calls the agent must make in this turn (other calls are allowed unless listed in must_not_call or beyond max_tool_calls). Checked when pass_criteria is tool_called_correctly or both."
     },
     "ordered": {"type": "boolean", "default": false, "description": "expected_tool_calls must occur in this order"},
     "must_not_call": {
@@ -19,6 +19,11 @@
       "items": {"type": "string", "minLength": 1},
       "uniqueItems": true,
       "description": "Tools that must not be called in this turn. Always enforced."
+    },
+    "max_tool_calls": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "The most tool calls this turn may make, expected or not; more fail the turn as extra_calls. Always enforced."
     },
     "expected_response_pattern": {
       "type": ["string", "null"],

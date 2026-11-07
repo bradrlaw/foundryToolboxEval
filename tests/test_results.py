@@ -1,4 +1,4 @@
-"""evals/results.py: run files."""
+"""evals/results.py: run files, and how repeated cases fared."""
 import json
 import tempfile
 import unittest
@@ -7,6 +7,24 @@ from pathlib import Path
 from unittest import mock
 
 from evals import results
+
+
+class PassRateTests(unittest.TestCase):
+    @staticmethod
+    def runs(cid, *passed):
+        return [{"case_id": cid, "passed": p} for p in passed]
+
+    def test_pass_rates_over_repeated_runs(self):
+        rates = results.pass_rates(self.runs("a", True, True, True) + self.runs("b", True, False, True)
+                                   + self.runs("c", False, False, False))
+        self.assertEqual((rates["k"], rates["flaky"]), (3, [("b", 2, 3)]))
+        self.assertAlmostEqual(rates["pass@1"], (1 + 2 / 3 + 0) / 3)
+        self.assertAlmostEqual(rates["pass@k"], 2 / 3)
+        self.assertAlmostEqual(rates["pass^k"], 1 / 3)
+        self.assertEqual(results.pass_rate_text(rates), "pass@1 56%, pass@3 67%, pass^3 33%")
+
+    def test_no_pass_rates_when_no_case_was_repeated(self):
+        self.assertIsNone(results.pass_rates(self.runs("a", True) + self.runs("b", False)))
 
 
 class WriteRunTests(unittest.TestCase):

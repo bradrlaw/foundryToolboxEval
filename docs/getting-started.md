@@ -89,7 +89,7 @@ To test a different toolbox endpoint, pass `--endpoint <url>`, or copy `config\t
 # Tool tests: call the toolbox directly (schema, errors, auth, latency)
 .\.venv\Scripts\python -m tooltests.run data\tool-tests\sample-toolbox.jsonl
 
-# Agent evals: deterministic checks of tool selection, arguments and answer content
+# Agent evals: deterministic checks of tool selection, arguments and answer content; add --repetitions 3 to find flaky turns
 .\.venv\Scripts\python -m evals.run_agent_evals data\agent-evals\sample-toolbox.jsonl
 
 # ASSERT behavior evals (LLM-judged); artifacts go to results\assert

@@ -68,6 +68,7 @@ class WhyFailedTests(unittest.TestCase):
         self.assertIn("### `tool_error`\n\n- `a` get_customer: expected ok, got tool_error: boom", text)
         self.assertIn("Regressions: `a` (tool_error)", text)
         self.assertNotIn("Platform aborts", text)
+        self.assertNotIn("Extra tool calls", text)
 
     def test_agent_report_counts_aborts_and_flags_turns(self):
         res = [turn(1, "response_mismatch", "response does not match /84/", platform_abort=True,
@@ -102,6 +103,43 @@ def ran(agent_version="2", model="gpt-4-1-mini", toolbox_version="3", commit="ab
         "repo": {"commit": commit, "dirty": dirty},
         "agent": {"name": "assistant", "version": agent_version, "model": model},
         "toolboxes": [{"name": "tb", "version": toolbox_version}]}}
+
+
+def run(n, repetition, failure=None, latency=10.0, extra_calls=0):
+    """Run `repetition` of agent turn c#n: passed, or failed with a (reason, message)."""
+    if failure is None:
+        return {**turn(n, "", "", repetition=repetition, latency_ms=latency, extra_calls=extra_calls),
+                "passed": True, "failures": [], "reasons": []}
+    return turn(n, *failure, repetition=repetition, latency_ms=latency, extra_calls=extra_calls)
+
+
+class RepeatedRunTests(unittest.TestCase):
+    MISS = ("missing_call", "expected call t {} not made")
+
+    def test_a_repeated_turn_passes_only_if_every_run_passed(self):
+        res = [run(1, 1, extra_calls=1), run(2, 1, latency=100.0), run(3, 1, self.MISS),
+               run(1, 2), run(2, 2, self.MISS, latency=300.0), run(3, 2, self.MISS),
+               run(1, 3, extra_calls=1), run(2, 3, latency=200.0), run(3, 3, self.MISS)]
+        base = {"timestamp": "b", "results": [run(1, 1), run(2, 1), run(3, 1, self.MISS)]}
+        text = report.case_report("Agent evals", {"timestamp": "t", "results": res}, base, AGENT_REASONS)
+        self.assertIn("Run `t`, 3 runs of each case: **1/3 passed every run**\n\n"
+                      "pass@1 56%, pass@3 67%, pass^3 33% (5/9 runs passed). "
+                      "Flaky (passed some runs, not all): `c#2` 2/3.", text)
+        self.assertIn("| a | 1 | 3 |", text)
+        self.assertIn("Latency (per-case p50): median 10 ms, max 200 ms", text)  # c#2's median run took 200 ms
+        self.assertIn("Extra tool calls (beyond those expected, over all runs): 2 (`c#1` 2)", text)
+        # A failure that recurs over a turn's runs is listed once.
+        self.assertIn(f"| `missing_call` | 2 | {AGENT_REASONS['missing_call']} |", text)
+        self.assertIn("### `missing_call`\n\n- `c#3` [3/3 runs]: expected call t {} not made\n"
+                      "- `c#2` [1/3 runs]: expected call t {} not made\n", text)
+        # c#2 passed its one baseline run; c#3 failed then and now.
+        self.assertIn("- Regressions: `c#2` (missing_call)\n- Fixed: none", text)
+
+    def test_an_unrepeated_run_reports_extra_calls_even_when_there_are_none(self):
+        text = report.case_report("Agent evals", {"results": [run(1, 1), run(2, 1)]}, None, AGENT_REASONS)
+        self.assertIn("**2/2 passed**", text)
+        self.assertIn("Extra tool calls (beyond those expected): none", text)
+        self.assertNotIn("pass@", text)
 
 
 class ProvenanceReportTests(unittest.TestCase):

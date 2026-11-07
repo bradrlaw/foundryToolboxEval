@@ -122,13 +122,13 @@ flowchart TB
 | Module | Responsibility |
 | --- | --- |
 | `tooltests/run.py` | MCP client for the toolbox: one session per run, outcome classification, assertions, latency percentiles, reconnects |
-| `evals/run_agent_evals.py` | Replays multi-turn conversations against the agent and scores every turn |
+| `evals/run_agent_evals.py` | Replays multi-turn conversations against the agent, optionally several times over, and scores every turn |
 | `evals/foundry_agent/target.py` | Calls the agent through the Responses API with retries, reads `mcp_call` and `message` output items, detects platform aborts and turns the agent never ran (`abort_reason`), and emits agent and tool spans. Its `chat()` is ASSERT's callable target |
 | `evals/cases.py` | Finds, parses and validates JSONL cases (JSON Schema plus cross-field and cross-file rules), and fills `{{caller.*}}` placeholders |
 | `evals/auth.py` | Entra tokens from `az login`, cached per scope and refreshed 5 minutes before expiry; the signed-in user's claims for placeholders |
 | `evals/toolbox_errors.py` | Recognizes toolbox errors caused by a tool source (consent needed, or the source failed) and prints consent links to the console, the only place they appear |
 | `evals/reasons.py` | Failure reason codes and what each means, shared by both runners and `report.py` |
-| `evals/results.py` | Writes each run of either runner to a new `run-<UTC timestamp>.json`; a run finishing in the same second as another waits for the next second, so no run overwrites another and names sort in run order |
+| `evals/results.py` | Writes each run of either runner to a new `run-<UTC timestamp>.json`; a run finishing in the same second as another waits for the next second, so no run overwrites another and names sort in run order. Also groups a repeated run's results by turn for pass rates, flaky turns and extra calls |
 | `evals/provenance.py` | Records what a run ran against: the commit and whether the working tree had changes, each toolbox's default version, and for agent runs the agent version and its model. Versions come only from `FOUNDRY_PROJECT_ENDPOINT`; what can't be read is null, and a failed lookup never fails a run |
 | `evals/telemetry.py` | `span()` helper and the optional App Insights exporter; does nothing without a connection string |
 | `scripts/run_assert.py` | Runs `assert-ai run` from the repo root with artifacts under `results/assert` |
@@ -181,6 +181,7 @@ classDiagram
         +list~ExpectedCall~ expected_tool_calls
         +bool ordered
         +list~string~ must_not_call
+        +int max_tool_calls
         +string expected_response_pattern
         +string response_must_not_match
         +string pass_criteria
@@ -229,7 +230,7 @@ flowchart LR
     expand --> read["parse each line<br/>as JSON"]
     read --> kind["pick the schema<br/>runner: fixed kind<br/>validator: --kind, folder or first record"]
     kind --> schema["JSON Schema<br/>Draft 2020-12"]
-    schema --> rules["cross-field rules<br/>ignored fields, bad regex or embedded schema,<br/>must_not_call overlapping expected calls,<br/>unknown caller placeholders"]
+    schema --> rules["cross-field rules<br/>ignored fields, bad regex or embedded schema,<br/>must_not_call overlapping expected calls,<br/>max_tool_calls below the expected calls,<br/>unknown caller placeholders"]
     rules --> files["cross-file rules<br/>duplicate ids, turn gaps"]
     files --> ok{"any problems?"}
     ok -->|"no"| cases(["cases"])
@@ -270,6 +271,7 @@ classDiagram
     class AgentRun {
         +string agent
         +string timestamp
+        +int repetitions
         +Provenance provenance
         +object usage
         +list~AgentResult~ results
@@ -282,6 +284,7 @@ classDiagram
     class AgentResult {
         +string conversation_id
         +int turn_number
+        +int repetition
         +string category
         +bool passed
         +list~string~ failures
@@ -296,6 +299,7 @@ classDiagram
         +string agent_version
         +string model
         +object usage
+        +int extra_calls
         +list~object~ tool_calls
         +string response
     }
@@ -306,6 +310,10 @@ classDiagram
 ```
 
 - `outcomes` counts outcomes across repetitions.
+- An agent run made with `--repetitions N` records `repetitions`, and each result its `repetition`: one result per turn
+  and run. Runs recorded before repetitions existed lack both and count as one run.
+- `extra_calls` counts a turn's tool calls beyond the number it expects. It is null when the turn doesn't check its
+  calls (`pass_criteria` `response_matches`) or no calls are known (the request raised, or the agent never ran).
 - `reasons` runs parallel to `failures`: `reasons[i]` is the code for `failures[i]`, described in `evals/reasons.py`.
   Reports group failures by it, and spans carry the distinct codes as `eval.reasons`.
 - `latency_ms` is the final HTTP attempt. `elapsed_ms` is the whole request: token fetches, every attempt and the
@@ -321,7 +329,9 @@ classDiagram
   that can't be read is null.
 - `abort_reason` is `tool_error`, `consent_required` or `tool_listing_failed` when `platform_abort` is true.
 - `report.py` matches results to a baseline by `case_id`, or by conversation and turn, and lists what the run ran
-  against that differs from the baseline's. An unknown version doesn't count as a change.
+  against that differs from the baseline's. An unknown version doesn't count as a change. A turn that ran several times
+  counts once: it passed only if every run passed, its latency is the median over its runs, and a failure that recurs
+  over its runs is listed once with the number of runs it occurred in.
 
 ## 5. Tool tests
 
@@ -514,13 +524,14 @@ tries the turn needed, and the console shows the elapsed time of turns that need
 | --- | --- | --- | --- |
 | `expected_tool_calls` | `pass_criteria` is `tool_called_correctly` or `both` | See the matching rules below | `missing_call`, `wrong_arguments` or `wrong_order` |
 | `must_not_call` | always | None of these tools was called | `forbidden_call` |
+| `max_tool_calls` | always, if set | No more tool calls than this, expected or not | `extra_calls` |
 | `expected_response_pattern` | `pass_criteria` is `response_matches` or `both`, and the platform didn't abort | Case-insensitive regex search over the whole reply | `response_mismatch` |
 | `response_must_not_match` | the platform didn't abort | The reply does not match | `forbidden_response` |
 | `max_latency_ms` | always, if set | Latency of the final HTTP attempt | `latency` |
 
 A turn the agent never ran (`abort_reason` `consent_required` or `tool_listing_failed`) fails with its note and the abort
 reason as its failure reason, and no other check runs. A turn the platform aborted on a tool error fails as
-`platform_abort`. Its tool calls and `must_not_call` are still checked, but the reply checks are skipped, because the user
+`platform_abort`. Its tool calls, `must_not_call` and `max_tool_calls` are still checked, but the reply checks are skipped, because the user
 got no reply. A turn whose request raised fails with `runner_error`.
 
 How `expected_tool_calls` are matched:
@@ -528,7 +539,9 @@ How `expected_tool_calls` are matched:
 - Each expected call must match its own call: the same name, and every listed param equal. Strings compare
   case-insensitively, and a `re:` prefix makes a param a regex search. Other values compare as JSON, so `true` doesn't
   equal `1`, while `1` equals `1.0`.
-- Extra params and extra calls are allowed.
+- Extra params are allowed, and so are extra calls unless `max_tool_calls` caps them. Every result records its
+  `extra_calls`, and reports total them, so an agent that calls more than it needs shows up even when its turns pass.
+  `max_tool_calls` counts every call, expected or not; a value below the number of expected calls is a case error.
 - Without `ordered`, expected calls are paired with calls so that as many as possible match. A broad `re:` param can't
   take the only call that a stricter expected call matches.
 - With `ordered`, the matches must occur in order.
@@ -541,7 +554,9 @@ How `expected_tool_calls` are matched:
 
 ```mermaid
 flowchart TD
-    group["group turns by conversation_id,<br/>sort by turn_number"] --> next["next turn"]
+    group["group turns by conversation_id,<br/>sort by turn_number"] --> rep["run r of --repetitions N"]
+    rep --> conv["next conversation,<br/>from an empty history"]
+    conv --> next["next turn"]
     next --> user["append the user message to the history"]
     user --> invoke["run_agent with the full history,<br/>inside an eval.turn span"]
     invoke --> score["score_turn<br/>an exception fails the turn"]
@@ -551,12 +566,31 @@ flowchart TD
     asst --> more{"more turns?"}
     gap --> more
     more -->|"yes"| next
-    more -->|"no"| conv(["next conversation"])
+    more -->|"no"| convs{"more conversations?"}
+    convs -->|"yes"| conv
+    convs -->|"no"| reps{"r less than N?"}
+    reps -->|"yes"| rep
+    reps -->|"no"| done(["one result per turn and run"])
 ```
 
 Each request replays the conversation as text: every user message, plus the assistant replies received so far. Tool
 results from earlier turns are not replayed, so the agent calls tools again when it needs the data. Using
 `previous_response_id` or Foundry conversations would keep that state; this is listed under Next in [plan.md](plan.md).
+
+### Repetitions
+
+An agent answers the same prompt differently from run to run, so one run can't tell a reliable turn from a lucky one.
+`--repetitions N` runs every conversation N times, each from an empty history. It runs all conversations, then all of
+them again, so a brief platform problem doesn't fail every run of one conversation. A turn passes only if every run
+passed (pass^N), and that decides the exit code, the report's totals and categories, and regressions against a baseline.
+The console and reports add:
+
+- pass@1: the mean share of runs that passed, per turn
+- pass@N: the share of turns that passed at least once
+- pass^N: the share of turns that passed every run
+- the flaky turns: those that passed some runs but not all
+
+Reason counts stay per turn: a turn that failed `missing_call` in two of three runs counts once.
 
 ## 7. ASSERT
 
