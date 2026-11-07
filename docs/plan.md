@@ -27,13 +27,16 @@ Checks: expected tool calls (+ param matching), `must_not_call`, response regex 
   (`evals/foundry_agent/target.py`, configs in `evals/configs/`, run with `scripts/run_assert.py`; one atomic behavior per
   config). Exact tool-call checks run via `python -m evals.run_agent_evals data/agent-evals/sample-toolbox.jsonl` (expected
   calls + params, ordered, `must_not_call`, response regex, latency; multi-turn by `conversation_id`). ASSERT does not
-  assert specific call parameters, so the two complement each other.
+  assert specific call parameters, so the two complement each other. Both ASSERT behaviors were scored in full in
+  November 2026; those runs are the baselines ([findings](../deploy/README.md#assert-findings)).
 - Reports (`scripts/report.py`: baseline diffs, failures grouped by reason, ASSERT violations with the judge's
   justifications) and App Insights telemetry (`docs/telemetry.md`): done. Every failure carries a reason code
   (`evals/reasons.py`) in the result files and spans. Traces run from the eval turn to the toolbox's requests, for open
   and OAuth identity-passthrough toolboxes alike.
 - CI: done. `.github/workflows/ci.yml` runs the offline checks (install, compile, case validation, unit tests) on Ubuntu
-  with Python 3.11 and 3.14 and on Windows with 3.14; no Azure access.
+  with Python 3.11 and 3.14 and on Windows with 3.14; no Azure access. `live.yml` runs the sample tool tests and agent
+  evals daily against the deployed toolbox and agent, as a managed identity signed in through OIDC, with the reports in
+  the job summary ([live-ci.md](live-ci.md)).
 - Per-user Entra identity: done ([entra.md](entra.md)). An Entra-protected sample server (`AUTH_MODE=entra`, region
   filtering by app role) behind an OAuth2 identity-passthrough connection; `{{caller.*}}` placeholders; the tool-test
   outcomes `consent_required` and `upstream_error`; and agent abort reasons for turns the agent never ran. `UserEntraToken`
@@ -81,8 +84,11 @@ Checks: expected tool calls (+ param matching), `must_not_call`, response regex 
 
 - Multi-turn fidelity (`previous_response_id` or Foundry conversations instead of text replay); provenance for ASSERT
   runs.
-- Live runs in CI (an OIDC federated credential and a test project); Foundry cloud evaluation as a server-side
-  alternative.
-- Identity: several test identities in one run (a role matrix, each case tagged with the identity it expects); hosted
-  agents, which forward `x-agent-foundry-call-id` to the toolbox; recheck `UserEntraToken` for custom audiences; confirm
-  consent survives the connection's refresh-token expiry.
+- Agent grounding: instruct `customer-assistant` not to supply figures that no tool returned, even when the user
+  insists, and to name the supported options a tool error lists; then rerun both ASSERT behaviors against their
+  baselines (`report.py assert <run> --baseline <run>`).
+- Foundry cloud evaluation as a server-side alternative.
+- Identity: several test identities in one run (a role matrix, each case tagged with the identity it expects); the Entra
+  suites in live CI, which need a test user who has consented; hosted agents, which forward `x-agent-foundry-call-id` to
+  the toolbox; recheck `UserEntraToken` for custom audiences; confirm consent survives the connection's refresh-token
+  expiry.

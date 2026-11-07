@@ -35,9 +35,11 @@ In `.env` (treat the connection string as a secret; never commit it):
 APPLICATIONINSIGHTS_CONNECTION_STRING=InstrumentationKey=...;IngestionEndpoint=...
 # APPLICATIONINSIGHTS_USE_AAD=1     # if the resource disables local (key) auth; needs Monitoring Metrics Publisher
 # OTEL_SERVICE_NAME=...             # overrides the cloud role name
+# OTEL_RESOURCE_ATTRIBUTES=service.instance.id=<name>   # sets the cloud role instance (default: the host name)
 ```
 
-Run the runners with the venv python (it has `azure-monitor-opentelemetry-exporter`). Ingestion lags 2–3 minutes.
+Run the runners with the venv python (it has `azure-monitor-opentelemetry-exporter`). Ingestion lags 2–3 minutes. Live
+CI ([live-ci.md](live-ci.md)) sets the role instance to `github-actions-<run id>`, so its spans are easy to tell apart.
 
 ## 3. What is emitted
 
@@ -89,6 +91,12 @@ Portal → App Insights → Logs (spans are in `dependencies`, the toolbox's req
 // eval pass rate by day
 dependencies | where name == "eval.turn"
 | summarize turns=count(), passed=countif(tostring(customDimensions["eval.passed"]) =~ "true") by bin(timestamp, 1d)
+
+// live CI runs: tool-test cases and agent turns passed, by run
+dependencies | where cloud_RoleInstance startswith "github-actions-" and name in ("toolbox.test_case", "eval.turn")
+| summarize n=count(), passed=countif(tostring(customDimensions["eval.passed"]) =~ "true"), start=min(timestamp)
+    by run=cloud_RoleInstance, name
+| order by start desc
 
 // tool-test outcomes by tool
 dependencies | where name == "toolbox.test_case"

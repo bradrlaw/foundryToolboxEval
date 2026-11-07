@@ -7,6 +7,8 @@ package) everything is a no-op, so local runs and offline tests need no Azure ac
   APPLICATIONINSIGHTS_USE_AAD=1           authenticate ingestion with `az login` (Entra) instead of the
                                           instrumentation key; required if the resource disables local auth
   OTEL_SERVICE_NAME                       overrides the cloud role name (default per entry point)
+  OTEL_RESOURCE_ATTRIBUTES                e.g. service.instance.id=<name>, the cloud role instance
+                                          (default: the host name); live CI sets github-actions-<run id>
 """
 from __future__ import annotations
 

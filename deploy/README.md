@@ -9,6 +9,7 @@ Real values for this deployment are kept in the git-ignored `deploy/resources.lo
 | Project connection | `sample-mcp-conn` (category `RemoteTool`, auth `None`) |
 | Toolbox | `sample-customer-toolbox` (v1, default) |
 | Consumer endpoint | `{project_endpoint}/toolboxes/sample-customer-toolbox/mcp?api-version=v1` |
+| CI identity | User-assigned managed identity `id-toolbox-eval-ci` in `<sample-rg>`: Foundry User on the project, and a federated credential for the repository's `live` environment ([docs/live-ci.md](../docs/live-ci.md)) |
 
 The host is unauthenticated (synthetic data only). Calls to the toolbox need a bearer token for `https://ai.azure.com/.default`
 (`az account get-access-token --resource https://ai.azure.com`).
@@ -88,6 +89,29 @@ The Entra stack ([docs/entra.md](../docs/entra.md)) runs beside it:
   `tools/list` took about 0.3 s on both. Both apps kept one warm replica. Toolbox spans in Application Insights put the
   difference inside Foundry: an OAuth `tools/call` spent 490-980 ms in the toolbox, against 90-115 ms without auth, and
   the rest of the round trip (network and client) was about 150-190 ms in both.
+
+## ASSERT findings
+
+Both behaviors ran in November 2026 against `customer-assistant` v2 (`gpt-4-1-mini`), judged by `gpt-5.6-sol`, and every
+case was scored. These runs are the baselines for later ones (`report.py assert <run> --baseline <run>`).
+
+| Behavior | Cases | Dimension | Prompts violated | Scenarios violated |
+| --- | ---: | --- | ---: | ---: |
+| `ungrounded_figures` | 36 | `figure_grounding` | 10 of 24 | 5 of 12 |
+| `tool_error_handling` | 18 | `graceful_error` | 1 of 12 | 1 of 6 |
+
+- **Under pressure, the agent fills gaps with its own figures.** In 13 of the 15 ungrounded-figures violations the user
+  insisted. In 10, a tool had returned no data (a privately held company, an unknown ticker or customer, an unsupported
+  industry): the agent said so, then supplied a share price, P/E, valuation, growth rate or contract value anyway, twice
+  with advice to put it in a valuation memo or a lender appendix (`harm_actionability`). The other five: a currency
+  conversion at an invented rate, a contract value that contradicted the tool's, a user's remembered figure restated as
+  confirmed, manufacturing data stretched to aerospace, and a claim to have checked records the tools don't return.
+- The judge's `overrefusal` flags (8 of 24 prompts, 4 of 12 scenarios) fall on those same replies. None is a refusal:
+  each misses a permissible behavior (relay the data faithfully, say it is unavailable, or ask which customer) through
+  the same ungrounded content.
+- **Tool errors are mostly handled well.** Two replies to an unsupported industry didn't name the supported ones, though
+  the tool's error lists them, and one turned an unknown ticker into a claim that no listing exists anywhere. One
+  `pii_leakage` flag was for naming the customer's (synthetic) account manager.
 
 ## Agent
 

@@ -1,4 +1,4 @@
-# Offline checks only: no Azure credentials, no live toolbox or agent calls.
+# Offline checks only: no Azure credentials, no live toolbox or agent calls. Live runs: live.yml.
 name: CI
 
 on:

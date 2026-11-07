@@ -106,13 +106,13 @@ To test a different toolbox endpoint, pass `--endpoint <url>`, or copy `config\t
 Expected for the samples: tool tests 14/14 and agent evals 10/10. In the `tool_error` turns (`c-private`,
 `c-unknown-customer`) a tool returns an error, and the agent must explain it without leaking the raw error text. If the
 platform aborts the request instead (see Troubleshooting), those turns fail as `platform_abort`. ASSERT results are not
-fixed; the first baseline found real violations (e.g. manufacturing data applied to aerospace).
+fixed; the November 2026 baselines found real violations ([findings](../deploy/README.md#assert-findings)).
 
 Both runners exit 0 when everything passes, 1 when a case fails, and 2 on invalid cases or a setup error. A run with
 failures ends with a line such as `Failed by reason: tool_error 3, assertion 3, missing_tool 1`; the report lists each
 failure under its reason.
 
-Add telemetry with [telemetry.md](telemetry.md).
+Add telemetry with [telemetry.md](telemetry.md), and daily runs in GitHub Actions with [live-ci.md](live-ci.md).
 
 ## 7. Optional: per-user Entra identity
 

@@ -1,0 +1,96 @@
+# Live runs against the deployed toolbox and agent: the tool tests and the deterministic agent evals, daily and on
+# demand. Signs in to Azure as a user-assigned managed identity through OIDC, so no Azure credential is stored here.
+# Setup and notes: docs/live-ci.md. Result files stay on the runner, because they name the endpoint; the reports go to
+# the job summary.
+name: Live
+
+on:
+  schedule:
+    - cron: "0 12 * * *"   # daily at 12:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write   # the OIDC token that azure/login exchanges for an Entra token
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  live:
+    name: Tool tests and agent evals
+    runs-on: ubuntu-latest
+    environment: live   # holds the secrets; only main can use it
+    timeout-minutes: 30
+    env:
+      PYTHONIOENCODING: utf-8
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
+      FOUNDRY_PROJECT_ENDPOINT: ${{ secrets.FOUNDRY_PROJECT_ENDPOINT }}
+      APPLICATIONINSIGHTS_CONNECTION_STRING: ${{ secrets.APPLICATIONINSIGHTS_CONNECTION_STRING }}
+      # CI spans get cloud_RoleInstance github-actions-<run id> in App Insights.
+      OTEL_RESOURCE_ATTRIBUTES: service.instance.id=github-actions-${{ github.run_id }}
+    steps:
+      - name: Mask the resource and project names
+        # Secrets are masked only as whole values, and these parts of the endpoint can appear on their own.
+        run: |
+          if [ -z "$FOUNDRY_PROJECT_ENDPOINT" ]; then
+            echo "::error::The live environment has no FOUNDRY_PROJECT_ENDPOINT secret; see docs/live-ci.md."
+            exit 1
+          fi
+          endpoint="${FOUNDRY_PROJECT_ENDPOINT%/}"
+          host="${endpoint#https://}"
+          echo "::add-mask::${host%%.*}"
+          echo "::add-mask::${endpoint##*/}"
+
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.14"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+
+      - name: Sign in to Azure
+        uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906  # v3.1.0
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Get the Foundry token
+        # az can't sign in again once GitHub's OIDC token expires, minutes from now. It caches this access token,
+        # which outlasts the job, for the runners.
+        run: az account get-access-token --scope https://ai.azure.com/.default --output none
+
+      - name: Tool tests
+        id: tools
+        continue-on-error: true
+        run: python -m tooltests.run data/tool-tests/sample-toolbox.jsonl
+
+      - name: Agent evals
+        id: agent
+        continue-on-error: true
+        run: python -m evals.run_agent_evals data/agent-evals/sample-toolbox.jsonl
+
+      - name: Reports to the job summary
+        if: ${{ !cancelled() }}
+        run: |
+          for kind in tool agent; do
+            python scripts/report.py "$kind" >> "$GITHUB_STEP_SUMMARY" ||
+              echo "No $kind report: the run recorded no results; see its step's log." >> "$GITHUB_STEP_SUMMARY"
+          done
+
+      - name: Fail if a run failed
+        if: ${{ steps.tools.outcome != 'success' || steps.agent.outcome != 'success' }}
+        env:
+          TOOLS: ${{ steps.tools.outcome }}
+          AGENT: ${{ steps.agent.outcome }}
+        run: |
+          echo "::error::Tool tests: $TOOLS, agent evals: $AGENT. Exit code 1 means failed cases, 2 a setup error."
+          exit 1

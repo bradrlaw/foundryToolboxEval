@@ -12,7 +12,7 @@ Terminology: *tests* call the toolbox directly; *evals* involve an agent.
 This repo is independent of `copilot-studio-evals`; it reuses the idea of a canonical
 JSONL format but defines its own schemas.
 
-Docs: [getting started](docs/getting-started.md) (deploy and run the samples), [existing environment](docs/existing-environment.md) (your own Foundry project/toolbox/agents), [Entra identity](docs/entra.md) (per-user identity passed through to an Entra-protected MCP server), [architecture](docs/architecture.md) (components, flows and diagrams), [telemetry](docs/telemetry.md) (App Insights), [plan](docs/plan.md).
+Docs: [getting started](docs/getting-started.md) (deploy and run the samples), [existing environment](docs/existing-environment.md) (your own Foundry project/toolbox/agents), [Entra identity](docs/entra.md) (per-user identity passed through to an Entra-protected MCP server), [architecture](docs/architecture.md) (components, flows and diagrams), [telemetry](docs/telemetry.md) (App Insights), [live CI](docs/live-ci.md) (daily live runs in GitHub Actions), [plan](docs/plan.md).
 
 ## Layout
 
@@ -28,14 +28,14 @@ Docs: [getting started](docs/getting-started.md) (deploy and run the samples), [
 | `deploy/` | Notes and findings for the deployed sample toolbox |
 | `docs/` | Setup guides, architecture, telemetry, plan |
 | `tests/` | Offline unit tests |
-| `.github/workflows/` | CI: the offline checks on Ubuntu and Windows |
+| `.github/workflows/` | CI: the offline checks on Ubuntu and Windows (`ci.yml`), and daily live runs (`live.yml`) |
 | `results/` | Run output (git-ignored) |
 
 ## Status
 
 Working: sample MCP server, tool-test runner, deterministic agent-eval runner, ASSERT behavior configs, reports that show
-why cases failed, App Insights telemetry, offline CI, and per-user Entra identity through OAuth2 identity passthrough
-([docs/entra.md](docs/entra.md)).
+why cases failed, App Insights telemetry, offline CI, daily live runs in CI ([docs/live-ci.md](docs/live-ci.md)), and
+per-user Entra identity through OAuth2 identity passthrough ([docs/entra.md](docs/entra.md)).
 
 ## Setup
 
@@ -128,8 +128,10 @@ which catches raw platform-failure replies and leaked internals. The judge needs
 To judge another agent, set `$env:FOUNDRY_AGENT_NAME` first. A turn the agent never ran (missing consent, or its tools
 couldn't be listed) is recorded as a target error and not scored.
 
-Findings so far: the agent applied "manufacturing" market data to aerospace, and tool errors, which aborted the agent
-request through October 2026, now reach the model as text (see `deploy/README.md`).
+Findings so far ([deploy/README.md](deploy/README.md#assert-findings)): when a tool returns no data and the user insists,
+the agent often supplies an estimate of its own (`figure_grounding` violated in 15 of 36 cases), while it handles tool
+errors well (`graceful_error` violated in 2 of 18). Tool errors, which aborted the agent request through October 2026,
+now reach the model as text.
 
 ## Reports
 
@@ -156,6 +158,10 @@ the error for each case it couldn't score (for example the Responses API's error
 
 GitHub Actions (`.github\workflows\ci.yml`) runs the offline checks on pushes to `main`, pull requests and manual runs:
 dependency install and `pip check`, a byte-compile of every source file, case validation and the unit tests, on Ubuntu
-with Python 3.11 and 3.14 and on Windows with 3.14. Changes that touch only docs or Markdown skip it. CI has no Azure
-credentials and calls nothing live. Dependabot (`.github\dependabot.yml`) opens weekly PRs for the pinned Python packages
-(grouping minor and patch bumps), the sample server's base image and the workflow's actions; CI checks each one.
+with Python 3.11 and 3.14 and on Windows with 3.14. Changes that touch only docs or Markdown skip it. `ci.yml` has no
+Azure credentials and calls nothing live. Dependabot (`.github\dependabot.yml`) opens weekly PRs for the pinned Python
+packages (grouping minor and patch bumps), the sample server's base image and the workflows' actions; CI checks each one.
+
+`.github\workflows\live.yml` runs the sample tool tests and agent evals against the deployed toolbox and agent every day
+at 12:00 UTC and on demand, signed in as a managed identity through OIDC, and puts both reports in the job summary.
+Setup and limits: [docs/live-ci.md](docs/live-ci.md).

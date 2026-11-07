@@ -65,8 +65,9 @@ flowchart TB
     foundry -.->|"server-side spans"| appi
 ```
 
-Everything runs locally against live Azure resources; no eval code runs inside Azure. Resource identifiers come from the
-git-ignored `.env`, and tracked files contain none.
+The runners run locally, or in GitHub Actions for the daily live runs ([live-ci.md](live-ci.md)), against live Azure
+resources; no eval code runs inside Azure. Resource identifiers come from the git-ignored `.env` (in CI, from the `live`
+environment's secrets), and tracked files contain none.
 
 ## 3. Components
 
@@ -138,7 +139,8 @@ flowchart TB
 | `scripts/setup_entra.py` | Registers the Entra apps for the Entra sample through Microsoft Graph: the API app (scope, app roles, your role assignments) and the OAuth client app |
 | `sample-mcp-server/` | Synthetic MCP server, packaged as a container image: three tools, plus Entra token validation (`entra_auth.py`), region filtering and `whoami` with `AUTH_MODE=entra` |
 | `tests/` | Offline unit tests: no Azure access or `.env` needed |
-| `.github/workflows/ci.yml` | CI on pushes to `main` and pull requests: dependency check, byte-compile, case validation and unit tests on Ubuntu (Python 3.11 and 3.14) and Windows (3.14). Offline only; live runs would need Azure credentials, for example OIDC |
+| `.github/workflows/ci.yml` | CI on pushes to `main` and pull requests: dependency check, byte-compile, case validation and unit tests on Ubuntu (Python 3.11 and 3.14) and Windows (3.14). Offline only |
+| `.github/workflows/live.yml` | Daily and manual live runs of the sample tool tests and agent evals, as a managed identity signed in through OIDC; reports go to the job summary and result files stay on the runner ([live-ci.md](live-ci.md)) |
 | `.github/dependabot.yml` | Weekly update PRs for the pinned packages in both `requirements.txt` files, the sample server's base image and the CI actions |
 
 ## 4. Cases and results
@@ -700,6 +702,7 @@ flowchart LR
 | Caller | Credential | Audience |
 | --- | --- | --- |
 | Tool runner, agent target | `evals.auth` (AzureCliCredential, cached, thread-safe) | `https://ai.azure.com/.default`; the tool runner can take `token_scope` from `--config` |
+| Live CI | `azure/login` signs `az` in as a managed identity with GitHub's OIDC token, so the runners' AzureCliCredential works unchanged ([live-ci.md](live-ci.md)) | `https://ai.azure.com/.default`, fetched right after sign-in, before the OIDC token expires |
 | Caller placeholders | `auth.caller_claims` reads the claims of that same cached token, without a signature check | None: no extra token |
 | ASSERT model calls | assert-ai's Entra auth (`ASSERT_AZURE_USE_AAD=1`) | Azure OpenAI at `AZURE_API_BASE` |
 | App Insights export | AzureCliCredential if `APPLICATIONINSIGHTS_USE_AAD=1`, else the connection string's key | App Insights ingestion |
@@ -733,6 +736,7 @@ root, and `run_assert.py` runs ASSERT from the repo root so it loads the same fi
 | `APPLICATIONINSIGHTS_CONNECTION_STRING` | `evals/telemetry.py` | Turns on span export |
 | `APPLICATIONINSIGHTS_USE_AAD` | `evals/telemetry.py` | Entra auth for ingestion |
 | `OTEL_SERVICE_NAME` | `evals/telemetry.py` | Overrides the cloud role name |
+| `OTEL_RESOURCE_ATTRIBUTES` | OpenTelemetry SDK | `service.instance.id=<name>` sets the cloud role instance; live CI sets `github-actions-<run id>` |
 | `ENTRA_TENANT_ID`, `ENTRA_API_APP_ID` | `setup_entra.py` (writes), `deploy_toolbox.py`; the Entra sample server as Container App settings | The Entra sample's tenant and API app |
 | `ENTRA_OAUTH_CLIENT_APP_ID` | `setup_entra.py` (writes), `deploy_toolbox.py --auth-type OAuth2` | The OAuth client app for identity passthrough |
 
@@ -771,7 +775,8 @@ The first entry point to install the tracer provider sets the cloud role:
 | Deterministic agent evals | `foundry-agent-evals` | `eval.turn`, with the target's `foundry_agent` and `tool:*` spans as children |
 | ASSERT, or the target run on its own | `foundry-agent-target` | `foundry_agent`, `tool:*` |
 
-`OTEL_SERVICE_NAME` overrides all three. Because the target injects `traceparent`, Foundry's server spans share the eval
+`OTEL_SERVICE_NAME` overrides all three. The cloud role instance is the host name unless `OTEL_RESOURCE_ATTRIBUTES` sets
+`service.instance.id`, as live CI does. Because the target injects `traceparent`, Foundry's server spans share the eval
 turn's `operation_Id`, so one trace runs from the eval turn through the model and tool calls, down to the toolbox's
 `agentsv2` requests. Use the server-side spans for real tool latency: `execute_tool` for the agent's view, the toolbox's
 `tools/call` requests for the tool's. The tool runner sends `traceparent` too, as an HTTP header, because the toolbox
@@ -894,6 +899,11 @@ Deploy steps and current findings: [getting-started.md](getting-started.md) and 
   - OAuth2 identity passthrough is the supported path, because `UserEntraToken` doesn't work for custom servers.
 - **Consent links stay on the console.** Whoever completes a link binds their account to the connection, so the runners
   treat links like secrets.
+- **Live CI signs in as a managed identity.**
+  - GitHub's OIDC token is exchanged for an Entra token, so no Azure secret is stored, and the federated credential
+    trusts only the `live` environment, which only `main` can use.
+  - `az` does the sign-in, so the runners' `AzureCliCredential` works unchanged.
+  - Result files stay on the runner because they name the endpoint. The reports don't, so they go to the job summary.
 
 ## 14. Extending
 
@@ -907,4 +917,5 @@ Deploy steps and current findings: [getting-started.md](getting-started.md) and 
 | Add a failure reason | `Failure("code", message)` in the runner, and the code's meaning in `TOOL_REASONS` or `AGENT_REASONS` in `evals/reasons.py`; `tests/test_reasons.py` fails on undescribed codes |
 | Add a span attribute | `telemetry.span(...)` calls in the runners; document it in [telemetry.md](telemetry.md) |
 | Test a toolbox that passes the user's identity | [entra.md](entra.md): consent once, then allowed and denied cases that use `{{caller.*}}` placeholders |
+| Run suites daily in GitHub Actions | `.github/workflows/live.yml` and the `live` environment; see [live-ci.md](live-ci.md) |
 | Add a caller placeholder | `CALLER_FIELDS` in `evals/cases.py` and `auth.caller_claims`, plus unit tests |
