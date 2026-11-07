@@ -7,26 +7,34 @@ AUTH_MODE=none (default): no authentication.
 AUTH_MODE=entra: every request needs an Entra access token issued to the server's API app on
 behalf of a user (see entra_auth.py for the settings). Adds a whoami tool, and customer data is
 limited to the regions the caller's app roles allow (data.REGION_ROLES).
+
+Each tool publishes an outputSchema (models.py) and returns its result as structured content,
+plus the same JSON as text for the model.
 """
 import json
 import os
+from typing import Annotated
 
 from mcp.server.mcpserver import Context, MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
+from mcp.types import CallToolResult, TextContent
 
 import data
 import entra_auth
+import models
 
-NAME, VERSION = "sample-customer-tools", "1.1.0"
+NAME, VERSION = "sample-customer-tools", "1.2.0"
 
 
-def _json(fn) -> str:
+def _result(fn) -> CallToolResult:
+    """The tool's dict as structured content, and as compact JSON text."""
     try:
-        return json.dumps(fn())
+        value = fn()
     except data.ToolError as e:
         # Only ToolError keeps its message in the isError result; other exceptions
         # reach the caller as a bare "Error executing tool <name>".
         raise ToolError(str(e)) from e
+    return CallToolResult(content=[TextContent(type="text", text=json.dumps(value))], structured_content=value)
 
 
 def create_server(entra: entra_auth.EntraSettings | None = None, verifier=None) -> MCPServer:
@@ -47,24 +55,29 @@ def create_server(entra: entra_auth.EntraSettings | None = None, verifier=None) 
     def gate(ctx: Context | None, customer: dict) -> dict | None:
         return data.access_denied(customer, roles(ctx)) if entra else None
 
+    # With Entra, a lookup by customer can return a denial instead, so its schema admits either shape.
+    customer_output = models.Customer if entra is None else models.CustomerOrDenied
+    quote_output = models.StockQuote if entra is None else models.QuoteOrDenied
+
     @mcp.tool()
-    def get_customer(customer_id: str | None = None, name: str | None = None, ctx: Context | None = None) -> str:
+    def get_customer(customer_id: str | None = None, name: str | None = None,
+                     ctx: Context | None = None) -> Annotated[CallToolResult, customer_output]:
         """Look up a customer profile (industry, tier, region, account manager, contract value, ticker).
         Provide customer_id (e.g. C1001) or a full/partial company name that matches one customer."""
         def run():
             customer = data.get_customer(customer_id=customer_id, name=name)
             return gate(ctx, customer) or customer
-        return _json(run)
+        return _result(run)
 
     @mcp.tool()
-    def get_market_conditions(industry: str) -> str:
+    def get_market_conditions(industry: str) -> Annotated[CallToolResult, models.MarketConditions]:
         """Get current market conditions for an industry: outlook, YoY growth, sentiment, drivers, risks.
         Supported industries: manufacturing, healthcare, energy, retail."""
-        return _json(lambda: data.get_market_conditions(industry=industry))
+        return _result(lambda: data.get_market_conditions(industry=industry))
 
     @mcp.tool()
     def get_stock_quote(customer_id: str | None = None, ticker: str | None = None,
-                        ctx: Context | None = None) -> str:
+                        ctx: Context | None = None) -> Annotated[CallToolResult, quote_output]:
         """Get a customer's current stock price and market cap by customer_id or ticker.
         Privately held customers have no quote."""
         def run():
@@ -72,15 +85,15 @@ def create_server(entra: entra_auth.EntraSettings | None = None, verifier=None) 
             if customer_id and (denied := gate(ctx, data.get_customer(customer_id=customer_id))):
                 return denied
             return data.get_stock_quote(customer_id=customer_id, ticker=ticker)
-        return _json(run)
+        return _result(run)
 
     if entra is not None:
         @mcp.tool()
-        def whoami(ctx: Context) -> str:
+        def whoami(ctx: Context) -> Annotated[CallToolResult, models.WhoAmI]:
             """Show who the signed-in user is as this server sees them: name, username, object ID, tenant,
             app roles, scopes, the calling client app, and the customer regions they may read."""
-            return json.dumps({**entra_auth.describe(caller(ctx)), "auth_mode": "entra",
-                               "regions_visible": data.visible_regions(roles(ctx))})
+            return _result(lambda: {**entra_auth.describe(caller(ctx)), "auth_mode": "entra",
+                                    "regions_visible": data.visible_regions(roles(ctx))})
 
     return mcp
 

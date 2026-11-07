@@ -104,6 +104,16 @@ class ClassificationTests(NoTokenTestCase):
     def test_output_schema_violations_are_invalid_results(self):
         self.assertEqual(self.classify(RuntimeError("Invalid structured content")).outcome, "invalid_result")
 
+    def test_text_that_disagrees_with_structured_content_is_an_invalid_result(self):
+        class Client:
+            async def call_tool(self, tool, arguments):
+                return SimpleNamespace(content=[SimpleNamespace(type="text", text='{"price": 1}')],
+                                       structured_content={"price": 2}, is_error=False)
+
+        o = asyncio.run(run.Toolbox(Client(), run.HttpErrors(), TARGET).call("t", {}))
+        self.assertEqual(o.outcome, "invalid_result")
+        self.assertEqual(o.text, 'text content and structured content differ in price: {"price": 1}')
+
     def test_tool_source_failures(self):
         err = io.StringIO()
         with mock.patch.object(run.toolbox_errors, "_announced", set()), contextlib.redirect_stderr(err), \
@@ -182,6 +192,12 @@ class ListCaseTests(unittest.TestCase):
         self.assertIn("b: input schema is not an object schema", r["failures"])
         self.assertTrue(any(f.startswith("b: invalid output schema") for f in r["failures"]))
         self.assertEqual(r["reasons"], ["duplicate_tool", "missing_tool"] + ["tool_definition"] * 3)
+
+    def test_list_can_require_output_schemas(self):
+        tools = [tool("a", output_schema={"type": "object"}), tool("b")]
+        c = {"case_id": "l", "category": "x", "kind": "list", "expect_tools": ["a", "b"], "require_output_schemas": True}
+        r = asyncio.run(run.run_list(FakeToolbox(tools=tools), c))
+        self.assertEqual((r["failures"], r["reasons"]), (["b: no output schema"], ["tool_definition"]))
 
 
 class RunAllTests(NoTokenTestCase):

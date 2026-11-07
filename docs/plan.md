@@ -45,6 +45,10 @@ Checks: expected tool calls (+ param matching), `must_not_call`, response regex 
 - Agent scoring: done. `--repetitions N` reruns every conversation from a fresh history; a turn passes only if every
   run passes, and the console and reports add pass@1, pass@N, pass^N and the flaky turns. `max_tool_calls` fails a turn
   that makes too many calls, and every turn that checks its calls records `extra_calls`, the calls beyond those expected.
+- Typed tool outputs: done. The sample tools publish an `outputSchema` for each tool (Pydantic models; in Entra mode, an
+  inline `anyOf` of the record and the denial) and return `structuredContent` plus the same JSON as text. The tool runner
+  fails a call whose JSON text and structured content disagree (`invalid_result`; the MCP SDK already checks the
+  `outputSchema`), and list cases can require output schemas (`require_output_schemas`).
 
 ## Data format (JSONL, one case per line)
 
@@ -72,7 +76,6 @@ Checks: expected tool calls (+ param matching), `must_not_call`, response regex 
 
 ## Next
 
-- Read MCP `structuredContent` and validate it against each tool's `outputSchema`; return typed results from the sample tools.
 - Multi-turn fidelity (`previous_response_id` or Foundry conversations instead of text replay); provenance for ASSERT
   runs.
 - Live runs in CI (an OIDC federated credential and a test project); Foundry cloud evaluation as a server-side

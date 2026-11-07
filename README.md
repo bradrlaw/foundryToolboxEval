@@ -58,10 +58,13 @@ to one tenant. Use the venv's python for every command below.
 
 The endpoint is `<FOUNDRY_PROJECT_ENDPOINT>/toolboxes/<FOUNDRY_TOOLBOX_NAME>/mcp` unless `--endpoint`, `--config` or
 `--toolbox` is given. Case arguments accept globs (`"data\tool-tests\*.jsonl"`).
-Case kinds: `call` (default), `list` (tools/list checks), `auth` (bad/missing token -> expected status).
+Case kinds: `call` (default), `list` (tools/list checks: `expect_tools`, `require_schemas`, `require_output_schemas`),
+`auth` (bad/missing token -> expected status).
 Each call ends in one outcome (`ok`, `tool_error`, `protocol_error`, `consent_required`, `upstream_error`, `invalid_result`,
 `transport_error`, `runner_error`); `expect_error` (`true`/`"tool"` or `"protocol"`) sets the expected one. Assertion types:
 contains, regex, json_path_equals, json_path_exists, schema; plus `max_latency_ms` and `repetitions`.
+`invalid_result` means the result broke the MCP result format or the tool's `outputSchema` (the MCP SDK validates
+`structuredContent`), or its JSON text disagrees with its `structuredContent`.
 `consent_required` (the signed-in user hasn't consented to a tool source's OAuth connection) and `upstream_error` (the
 toolbox couldn't reach or authenticate to a tool source) always fail; consent links go to the console only.
 Failure reasons: the unexpected outcome (for example `tool_error`), `unexpected_success`, `assertion`, `latency`, a listing

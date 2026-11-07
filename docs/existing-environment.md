@@ -35,7 +35,8 @@ The agent is invoked by name through the Responses API (`agent_reference`); `eva
 Copy `data\tool-tests\sample-toolbox.jsonl` and edit; each line is one case validated by `schemas\tool-test.schema.json`.
 Kinds: `call`, `list`, `auth`. Assertions: contains, regex, json_path_equals, json_path_exists, schema; plus latency limits
 and `repetitions`. Cover happy path, not-found/invalid input (`expect_error: true` for an `isError` result,
-`"protocol"` for a JSON-RPC error), schema conformance, auth failures.
+`"protocol"` for a JSON-RPC error), schema conformance, auth failures. The sample's `list-001` sets
+`require_output_schemas`; remove it if your tools return text without an `outputSchema`.
 
 Agent evals (`data\agent-evals\*.jsonl`, `schemas\agent-eval.schema.json`): each turn gives the prompt, expected tool calls
 (name and argument checks), `must_not_call` and `max_tool_calls` (both always enforced) and answer assertions; turns with

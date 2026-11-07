@@ -9,7 +9,7 @@
     "kind": {
       "enum": ["call", "list", "auth"],
       "default": "call",
-      "description": "call = tools/call (tool, arguments); list = tools/list checks (expect_tools, require_schemas); auth = initialize with a bad or missing token (token, expect_status)"
+      "description": "call = tools/call (tool, arguments); list = tools/list checks (expect_tools, require_schemas, require_output_schemas); auth = initialize with a bad or missing token (token, expect_status)"
     },
     "category": {"type": "string", "minLength": 1},
     "tool": {"type": "string", "minLength": 1, "description": "call: toolbox tool name, e.g. sample___get_customer"},
@@ -26,6 +26,11 @@
       "type": "boolean",
       "default": false,
       "description": "list: every tool has a description, an object inputSchema, and valid input/output JSON Schemas"
+    },
+    "require_output_schemas": {
+      "type": "boolean",
+      "default": false,
+      "description": "list: every tool has an outputSchema (MCP structured output)"
     },
     "token": {"enum": ["invalid", "none"], "description": "auth: send an invalid bearer token, or no Authorization header"},
     "expect_status": {"type": "integer", "minimum": 100, "maximum": 599},

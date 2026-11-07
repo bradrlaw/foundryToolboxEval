@@ -29,7 +29,7 @@ KIND_FOLDERS = {"tool-tests": "tool", "agent-evals": "agent"}
 COMMON_TOOL_FIELDS = {"case_id", "kind", "category", "notes"}
 TOOL_KIND_FIELDS = {
     "call": {"tool", "arguments", "expect_error", "assertions", "repetitions", "max_latency_ms"},
-    "list": {"expect_tools", "require_schemas", "max_latency_ms"},
+    "list": {"expect_tools", "require_schemas", "require_output_schemas", "max_latency_ms"},
     "auth": {"token", "expect_status"},
 }
 ASSERTION_FIELDS = {

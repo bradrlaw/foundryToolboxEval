@@ -1,6 +1,6 @@
 import unittest
 
-from tooltests.run import check, json_equal, json_path, parse_output, split_output
+from tooltests.run import check, content_mismatch, json_equal, json_path, parse_output, split_output
 
 
 class OutputTests(unittest.TestCase):
@@ -18,6 +18,22 @@ class OutputTests(unittest.TestCase):
         self.assertEqual(parse_output('{"a": 1}', {"result": '{"a": 1}'}), {"a": 1})
         self.assertEqual(parse_output("summary for the model", {"a": 2}), {"a": 2})
         self.assertIsNone(parse_output("plain text"))
+
+    def test_content_mismatch_compares_json_text_with_structured_content(self):
+        self.assertIsNone(content_mismatch('{"b": 1, "a": [2.0]}\n{\n  "structuredResponse": {}\n}',
+                                           {"a": [2], "b": 1.0}))
+        self.assertEqual(content_mismatch('{"a": 1, "b": 2, "c": 3}', {"a": 1, "b": 3, "d": 4}),
+                         "text content and structured content differ in b, c, d")
+        self.assertEqual(content_mismatch('{"a": true}', {"a": 1}), "text content and structured content differ in a")
+        self.assertEqual(content_mismatch("[1]", {"a": 1}), "text content and structured content differ")
+
+    def test_content_mismatch_skips_what_it_cannot_compare(self):
+        self.assertIsNone(content_mismatch("summary for the model", {"a": 1}))
+        self.assertIsNone(content_mismatch('{"a": 1}', None))
+        # The SDK's {"result": ...} wrapper: a str result, a number, and a list sent as one text block per item.
+        self.assertIsNone(content_mismatch('{"a": 1}', {"result": '{"a": 1}'}))
+        self.assertIsNone(content_mismatch("5", {"result": 5}))
+        self.assertIsNone(content_mismatch('{"a": 1}', {"result": [{"a": 1}]}))
 
 
 class JsonPathTests(unittest.TestCase):

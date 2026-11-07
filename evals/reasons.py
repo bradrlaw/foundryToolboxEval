@@ -21,7 +21,8 @@ class Failure(NamedTuple):
 TOOL_REASONS = {
     "tool_error": "The tool returned an error result (isError).",
     "protocol_error": "The toolbox returned a JSON-RPC error, such as an unknown tool or invalid arguments.",
-    "invalid_result": "The result broke the tool's output schema or the MCP result format.",
+    "invalid_result": "The result broke the tool's output schema or the MCP result format, or its JSON text and "
+                      "structured content disagree.",
     "consent_required": "The signed-in user hasn't consented to a tool source's OAuth connection.",
     "upstream_error": "The toolbox couldn't reach or authenticate to a tool source.",
     "transport_error": "HTTP or network failure, a timeout, or a lost MCP session.",
@@ -30,7 +31,8 @@ TOOL_REASONS = {
     "latency": "Slower than the case's max_latency_ms.",
     "missing_tool": "An expected tool isn't listed.",
     "duplicate_tool": "A tool is listed more than once.",
-    "tool_definition": "A listed tool has an empty description or an invalid input or output schema.",
+    "tool_definition": "A listed tool has an empty description, an invalid input or output schema, or no output "
+                       "schema where the case requires one.",
     "auth_status": "A request with a missing or invalid token got an unexpected HTTP status.",
     "not_run": "Never ran: the MCP session was lost and reconnecting failed.",
     "runner_error": "The test runner itself failed on this case.",

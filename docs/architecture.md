@@ -162,6 +162,7 @@ classDiagram
         +int repetitions
         +list~string~ expect_tools
         +bool require_schemas
+        +bool require_output_schemas
         +string token
         +int expect_status
         +int max_latency_ms
@@ -202,7 +203,7 @@ Each tool-test `kind` uses its own fields. The validator flags fields the kind i
 | `kind` | Required | Optional |
 | --- | --- | --- |
 | `call` (default) | `tool`, `arguments` | `expect_error` (`false`, `true` or `"tool"`, `"protocol"`), `assertions`, `repetitions`, `max_latency_ms` |
-| `list` | `expect_tools` | `require_schemas`, `max_latency_ms` |
+| `list` | `expect_tools` | `require_schemas`, `require_output_schemas`, `max_latency_ms` |
 | `auth` | `token` (`invalid` or `none`), `expect_status` | none |
 
 Assertion types:
@@ -388,7 +389,8 @@ Every request ends in exactly one outcome:
 flowchart TD
     req["MCP request"] --> raised{"raised an error?"}
     raised -->|"no"| iserr{"result has isError?"}
-    iserr -->|"no"| ok(["ok"])
+    iserr -->|"no"| agree{"JSON text matches<br/>structuredContent?"}
+    agree -->|"yes, or nothing to compare"| ok(["ok"])
     iserr -->|"yes"| toolerr(["tool_error"])
     raised -->|"MCPError plus a non JSON-RPC HTTP error,<br/>connection closed, or request timeout"| transport(["transport_error"])
     raised -->|"other MCPError<br/>a JSON-RPC error response"| source{"caused by a tool source?<br/>toolbox_errors.classify"}
@@ -396,6 +398,7 @@ flowchart TD
     source -->|"failed, for example HTTP_401"| upstream(["upstream_error"])
     source -->|"no"| protocol(["protocol_error"])
     raised -->|"RuntimeError or ValidationError<br/>result breaks outputSchema or MCP shape"| invalid(["invalid_result"])
+    agree -->|"no"| invalid
     raised -->|"bug in the runner itself"| runner(["runner_error"])
 ```
 
@@ -410,6 +413,10 @@ A run passes when both of these hold:
 Assertions run only on the expected outcome, so they can check error text as well.
 
 - `consent_required`, `upstream_error`, `invalid_result`, `transport_error` and `runner_error` always fail.
+- A tool with an `outputSchema` must return `structuredContent` that matches it; the MCP SDK checks this when the call
+  returns and raises otherwise. The runner then compares the JSON text, the part a model reads, with the
+  `structuredContent` (`content_mismatch`). It skips text that isn't JSON, such as a summary for the model, and the SDK's
+  `{"result": ...}` wrapper around a result that isn't an object. Both problems are `invalid_result`.
 - A case passes when every repetition passes and none exceeds `max_latency_ms`.
 - The results record p50 and p95 latency across repetitions.
 - Each failure records a reason: the unexpected outcome, `unexpected_success` (an expected error didn't happen),
@@ -786,7 +793,7 @@ tool source that needs consent exits 2; the agent runner fails the affected turn
 ```mermaid
 flowchart LR
     subgraph repo["This repo"]
-        src["sample-mcp-server/<br/>server.py, data.py, Dockerfile"]
+        src["sample-mcp-server/<br/>server.py, models.py, data.py, Dockerfile"]
         dtb["scripts/deploy_toolbox.py"]
         dag["scripts/deploy_agent.py"]
     end
@@ -810,14 +817,17 @@ flowchart LR
 ```
 
 The server uses the `mcp` SDK's `MCPServer` and serves Streamable HTTP at `/mcp`. Its data is synthetic (`data.py`). A
-`ToolError` reaches the caller as an `isError` result that keeps its message.
+`ToolError` reaches the caller as an `isError` result that keeps its message. Each tool publishes an `outputSchema`, made
+from a Pydantic model in `models.py`, and returns its result twice: as `structuredContent` and as the same compact JSON
+text. `MCPServer` checks the structured content against the model before it replies.
 
 The Entra stack deploys beside this one from the same image, with `AUTH_MODE=entra`, an OAuth2 connection, its own
 toolbox and agent; its diagram is in [entra.md](entra.md#3-what-the-sample-deploys). In that mode `entra_auth.py`
 accepts only Entra user tokens issued to the server's API app, and the tools authorize from the token's app roles:
 `get_customer`, and `get_stock_quote` by customer ID, return a normal `access_denied` result for customers outside the
-caller's regions. Denials are results rather than tool errors, so the agent gets structured fields to explain them (and
-when the sample was built, a tool error aborted the whole agent request).
+caller's regions, and their `outputSchema` is an inline `anyOf` of the record and the denial. Denials are results rather
+than tool errors, so the agent gets structured fields to explain them (and when the sample was built, a tool error
+aborted the whole agent request).
 
 | Tool, as named in the toolbox | Input | Returns | Error cases |
 | --- | --- | --- | --- |
@@ -835,7 +845,7 @@ Deploy steps and current findings: [getting-started.md](getting-started.md) and 
 | The toolbox names tools `<server_label>___<tool>` | Cases call `sample___get_customer` and so on |
 | An unknown unprefixed tool returns JSON-RPC error -32602 "No tool config matches…" | `expect_error: "protocol"` |
 | An unknown prefixed tool returns an `isError` result "Unknown tool: x" | `expect_error: "tool"` |
-| The toolbox appends a `structuredResponse` block to tool text | Stripped by the tool runner (`split_output`) and the target (`_tool_output_text`) |
+| In an agent run, the toolbox appends the tool's `structuredContent` to the `mcp_call` output as a `structuredResponse` block; direct calls return it as `structuredContent` | Stripped by the target (`_tool_output_text`), and by the tool runner (`split_output`) in case a direct call's text has it too |
 | A tool error inside an agent run reaches the model only as text: the `mcp_call` item reports `status: completed` | Cases check the reply (`c-private`, `c-unknown-customer`), and the `tool_error_handling` ASSERT behavior judges it |
 | Through October 2026, a tool error inside an agent run failed the whole Responses call (HTTP 400) | `platform_abort` fails the turn, and later turns report `history_gap` |
 | Local DNS and connection failures lasting minutes have been observed | Retries in the target and in `_az.rest` |

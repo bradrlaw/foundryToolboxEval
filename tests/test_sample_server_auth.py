@@ -16,6 +16,7 @@ from pathlib import Path
 import httpx2
 import jwt
 from cryptography.hazmat.primitives.asymmetric import rsa
+from jsonschema import Draft202012Validator
 from mcp import Client
 from mcp.client.streamable_http import streamable_http_client
 
@@ -224,6 +225,25 @@ class HttpTests(unittest.TestCase):
         is_error, result = call(make_token(roles=["Customers.Read.All"]), "get_customer", {"customer_id": "C1004"})
         self.assertFalse(is_error)
         self.assertEqual(result["name"], "Adventure Works Retail")
+
+    def test_lookups_that_can_be_denied_publish_both_shapes(self):
+        calls = [("get_customer", {"customer_id": "C1001"}), ("get_customer", {"customer_id": "C1004"}),
+                 ("get_stock_quote", {"ticker": "ADVW"}), ("get_stock_quote", {"customer_id": "C1004"}),
+                 ("whoami", {})]
+
+        async def go(client):
+            schemas = {t.name: t.output_schema for t in (await client.list_tools()).tools}
+            return schemas, [await client.call_tool(tool, args) for tool, args in calls]
+
+        schemas, results = asyncio.run(_mcp(make_token(), go))
+        self.assertEqual([s["title"] for s in schemas["get_customer"]["anyOf"]], ["Customer", "AccessDenied"])
+        self.assertEqual([s["title"] for s in schemas["get_stock_quote"]["anyOf"]], ["StockQuote", "AccessDenied"])
+        self.assertNotIn("$ref", json.dumps(schemas))  # self-contained: nothing for a client or proxy to resolve
+        for (tool, args), result in zip(calls, results):
+            with self.subTest(tool=tool, args=args):
+                self.assertFalse(result.is_error)
+                self.assertEqual(json.loads(result.content[0].text), result.structured_content)
+                Draft202012Validator(schemas[tool]).validate(result.structured_content)
 
     def test_no_roles_sees_no_customers_but_market_data(self):
         token = make_token(roles=None)

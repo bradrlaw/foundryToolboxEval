@@ -172,6 +172,24 @@ def parse_output(text: str, structured: object = None) -> object | None:
     return parsed if parsed is not None else structured
 
 
+def content_mismatch(text: str, structured: object) -> str | None:
+    """A failure message if the text is JSON that disagrees with the structured content, else None.
+
+    MCP asks a server that returns structured content to send the same JSON as text, the part a model reads. Not
+    compared: text that isn't JSON (a summary for the model), and the SDK's {"result": ...} wrapper around a result
+    that isn't an object (a str, or a list, which it sends as one text block per item)."""
+    parsed = split_output(text)[1]
+    if parsed is None or structured is None or (isinstance(structured, dict) and list(structured) == ["result"]):
+        return None
+    if json_equal(parsed, structured):
+        return None
+    if isinstance(parsed, dict) and isinstance(structured, dict):
+        keys = sorted(k for k in parsed.keys() | structured.keys()
+                      if k not in parsed or k not in structured or not json_equal(parsed[k], structured[k]))
+        return f"text content and structured content differ in {', '.join(keys)}"
+    return "text content and structured content differ"
+
+
 _PATH_STEP = re.compile(r"\.([^.\[\]]+)|\[(\d+)\]")
 
 
@@ -308,6 +326,8 @@ class Toolbox:
             o.data = parse_output(o.text, result.structured_content)
             if result.is_error:
                 o.outcome = "tool_error"
+            elif problem := content_mismatch(o.text, result.structured_content):
+                o.outcome, o.text = "invalid_result", f"{problem}: {o.text}"
         return o
 
     async def list_tools(self) -> Outcome:
@@ -425,6 +445,8 @@ async def run_list(tb: Toolbox, case: dict) -> dict:
     failures += [Failure("missing_tool", f"tool {n!r} not listed") for n in case["expect_tools"] if n not in names]
     if case.get("require_schemas"):
         failures += [Failure("tool_definition", p) for t in tools for p in tool_definition_problems(t)]
+    if case.get("require_output_schemas"):
+        failures += [Failure("tool_definition", f"{t.name}: no output schema") for t in tools if not t.output_schema]
     o.text = ", ".join(sorted(set(names)))
     return summarize(case, [(o, failures)], latency_failures(case, [o]))
 

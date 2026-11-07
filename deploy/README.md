@@ -30,6 +30,10 @@ The Entra stack ([docs/entra.md](../docs/entra.md)) runs beside it:
   result. An unknown name with a valid prefix (`sample___nope`) is passed to the MCP server and comes back as `isError`.
 - Tool errors from the MCP server surface as `isError: true` with the original message, and so do missing or wrong-type
   arguments (with the validation message).
+- **Typed outputs pass through.** The toolbox lists each tool's `outputSchema` unchanged, including an `anyOf` of two
+  object shapes, and direct calls return the server's `structuredContent`. A redeployed server's new schemas were listed
+  at once, without redeploying the toolbox. Inside an agent run, the `mcp_call` output is the tool's text followed by a
+  `structuredResponse` block that holds the `structuredContent`, so the model reads the data twice.
 
 - **Tool errors reach the model as text.** When an MCP tool returns `isError: true` while an agent is calling it through
   the toolbox, the model gets the error message (`Error executing tool get_stock_quote: Customer C1005 ... is privately

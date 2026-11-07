@@ -140,8 +140,9 @@ With `AUTH_MODE=entra` the server (`sample-mcp-server/entra_auth.py`):
 | `Customers.Read.All` | All |
 
 A denied lookup returns a normal result, `{"access_denied": true, "customer_id", "region", "reason", "required_roles"}`,
-with none of the customer's data. It is a result rather than a tool error, so the agent gets structured fields to explain
-the denial; an agent sees a tool error only as text, and through October 2026 a tool error aborted the whole agent request
+with none of the customer's data. The tool's `outputSchema` is an inline `anyOf` of the record and this denial. It is a
+result rather than a tool error, so the agent gets structured fields to explain the denial; an agent sees a tool error
+only as text, and through October 2026 a tool error aborted the whole agent request
 (see [architecture.md](architecture.md#12-platform-behaviors-the-design-handles)). A quote by ticker is public, so it is not
 filtered; a quote by customer ID is filtered, because it reveals the customer.
 
