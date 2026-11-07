@@ -91,7 +91,7 @@ def by_reason(results: list[dict]) -> dict[str, list[tuple[dict, str]]]:
 
 def _flags(r: dict, reason: str) -> str:
     flags = []
-    if r.get("platform_abort") and r.get("abort_reason") != reason:
+    if r.get("platform_abort") and reason not in (r.get("abort_reason"), "platform_abort"):
         flags.append(f"platform abort: {r['abort_reason']}" if r.get("abort_reason") else "platform abort")
     if r.get("history_gap"):
         flags.append("history gap")

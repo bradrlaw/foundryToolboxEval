@@ -81,10 +81,13 @@ tool calls and arguments, `must_not_call`, response patterns and latency. Turns 
 one conversation.
 Each result records `tool_calls`, `response`, `latency_ms` (null when the call failed), `attempts` (HTTP tries, including
 retries), `platform_abort` with its `abort_reason`, and `history_gap`: an earlier turn got no answer (error or abort), so
-this turn's history lacks that reply. Abort reasons: `tool_error` (a tool error aborted the request; the turn is still
-scored), and `consent_required` or `tool_listing_failed` (the agent never ran, so the turn fails).
+this turn's history lacks that reply. Abort reasons: `tool_error` (the platform ended the request because a tool returned
+an error; the turn fails as `platform_abort`, and its tool calls are still checked), and `consent_required` or
+`tool_listing_failed` (the agent never ran, so the turn fails).
 Failure reasons: `missing_call`, `wrong_arguments`, `wrong_order`, `forbidden_call`, `response_mismatch`,
-`forbidden_response`, `latency`, `runner_error` (no reply), or the abort reason of a turn the agent never ran.
+`forbidden_response`, `latency`, `platform_abort` and `runner_error` (no reply), or the abort reason of a turn the agent
+never ran. Unordered expected calls are paired with distinct calls, and non-string params compare as JSON (`true` is not
+`1`); see [architecture.md](docs/architecture.md#scoring-a-turn).
 
 Both runners validate their cases first and exit 0 when everything passes, 1 when a case fails, and 2 on invalid cases or a
 setup error (config, sign-in, consent, connection). Each result keeps `failures` (messages) and a parallel `reasons` list
@@ -109,8 +112,8 @@ which catches raw platform-failure replies and leaked internals. The judge needs
 To judge another agent, set `$env:FOUNDRY_AGENT_NAME` first. A turn the agent never ran (missing consent, or its tools
 couldn't be listed) is recorded as a target error and not scored.
 
-Early findings: the agent applied "manufacturing" market data to aerospace, and platform tool errors abort the agent request
-(see `deploy/README.md`).
+Findings so far: the agent applied "manufacturing" market data to aerospace, and tool errors, which aborted the agent
+request through October 2026, now reach the model as text (see `deploy/README.md`).
 
 ## Reports
 

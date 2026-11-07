@@ -53,7 +53,7 @@ from mcp.types import CONNECTION_CLOSED, REQUEST_TIMEOUT, Implementation
 from pydantic import ValidationError
 
 from evals import __version__, auth, telemetry, toolbox_errors
-from evals.cases import ROOT, CaseError, fill_caller, format_error, load_cases, schema_validator
+from evals.cases import ROOT, CaseError, fill_caller, format_error, json_equal, load_cases, schema_validator
 from evals.reasons import Failure, summary_line
 
 CLIENT_INFO = Implementation(name="foundry-toolbox-tests", version=__version__)
@@ -63,7 +63,13 @@ MAX_PAGES = 100
 MAX_RECONNECTS = 3
 RECONNECT_BACKOFF_S = 2.0
 EXPECTED = {False: "ok", True: "tool_error", "tool": "tool_error", "protocol": "protocol_error"}
-SESSION_CLOSED = (anyio.ClosedResourceError, anyio.BrokenResourceError, anyio.EndOfStream)
+
+
+class SessionLost(Exception):
+    """The MCP session can't send requests anymore; run_all reconnects."""
+
+
+SESSION_CLOSED = (anyio.ClosedResourceError, anyio.BrokenResourceError, anyio.EndOfStream, SessionLost)
 
 
 class SetupError(RuntimeError):
@@ -191,17 +197,6 @@ def json_path(doc: object, path: str) -> object:
     return cur
 
 
-def json_equal(a: object, b: object) -> bool:
-    """JSON equality: unlike Python, true != 1 and 0 != false."""
-    if isinstance(a, bool) or isinstance(b, bool):
-        return type(a) is type(b) and a == b
-    if isinstance(a, dict) and isinstance(b, dict):
-        return a.keys() == b.keys() and all(json_equal(a[k], b[k]) for k in a)
-    if isinstance(a, list) and isinstance(b, list):
-        return len(a) == len(b) and all(map(json_equal, a, b))
-    return a == b
-
-
 def check(assertion: dict, raw: str, parsed: object | None) -> str | None:
     """Return a failure message, or None if the assertion holds."""
     kind = assertion.get("type")
@@ -283,6 +278,8 @@ class Toolbox:
             http = [h for h in self.http_errors.seen[mark:] if not h.jsonrpc]
             if http or e.code in (CONNECTION_CLOSED, REQUEST_TIMEOUT):
                 detail = "; ".join(map(str, http)) or f"MCP error {e.code}: {e}"
+                if e.code == CONNECTION_CLOSED and await self.session_closed():
+                    raise SessionLost(detail) from e
                 return Outcome("transport_error", detail, latency_ms=latency)
             if failure := toolbox_errors.classify(e.message, e.data, e.code):
                 if failure.consent:
@@ -292,6 +289,15 @@ class Toolbox:
         except (RuntimeError, ValidationError) as e:  # output-schema or protocol-shape violations
             return Outcome("invalid_result", str(e), latency_ms=_ms(start))
         return Outcome("ok", data=value, latency_ms=_ms(start))
+
+    async def session_closed(self) -> bool:
+        """After CONNECTION_CLOSED: True if the session is closed for good (the SDK closes it when its stream
+        ends, and then fails every request), False if only that request's response stream ended."""
+        try:
+            await self.client.send_ping()
+        except MCPError as e:
+            return e.code == CONNECTION_CLOSED
+        return False
 
     async def call(self, tool: str, arguments: dict) -> Outcome:
         o = await self.timed(lambda: self.client.call_tool(tool, arguments))
@@ -349,6 +355,8 @@ def explain(error: BaseException, http_errors: HttpErrors) -> str:
     for leaf in _leaves(error):
         if isinstance(leaf, MCPError) and http_errors.seen and not http_errors.seen[-1].jsonrpc:
             messages.append(str(http_errors.seen[-1]))
+        elif isinstance(leaf, SessionLost):
+            messages.append(str(leaf))
         elif failure := _source_failure(leaf):
             messages.append(failure.detail)
         else:

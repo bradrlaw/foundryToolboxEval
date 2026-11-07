@@ -61,6 +61,17 @@ def schema_validator(schema: dict) -> Draft202012Validator:
     return cls(schema, format_checker=cls.FORMAT_CHECKER)
 
 
+def json_equal(a: object, b: object) -> bool:
+    """JSON equality: unlike Python, true != 1 and 0 != false."""
+    if isinstance(a, bool) or isinstance(b, bool):
+        return type(a) is type(b) and a == b
+    if isinstance(a, dict) and isinstance(b, dict):
+        return a.keys() == b.keys() and all(json_equal(a[k], b[k]) for k in a)
+    if isinstance(a, list) and isinstance(b, list):
+        return len(a) == len(b) and all(map(json_equal, a, b))
+    return a == b
+
+
 @cache
 def _case_validator(kind: str) -> Draft202012Validator:
     schema = json.loads((ROOT / "schemas" / SCHEMA_FILES[kind]).read_text(encoding="utf-8"))
@@ -213,8 +224,12 @@ def _identity(kind: str, case: object) -> tuple[str, object] | None:
 
 
 def _read_jsonl(path: Path) -> tuple[list[tuple[int, object]], list[str]]:
+    try:
+        text = path.read_text(encoding="utf-8-sig")
+    except (OSError, UnicodeDecodeError) as e:
+        return [], [f"{path}: cannot read: {e}"]
     rows, problems = [], []
-    for n, line in enumerate(path.read_text(encoding="utf-8-sig").splitlines(), 1):
+    for n, line in enumerate(text.splitlines(), 1):
         if not line.strip():
             continue
         try:

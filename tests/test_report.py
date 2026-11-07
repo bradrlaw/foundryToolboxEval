@@ -73,11 +73,13 @@ class WhyFailedTests(unittest.TestCase):
         res = [turn(1, "response_mismatch", "response does not match /84/", platform_abort=True,
                     abort_reason="tool_error"),
                turn(2, "consent_required", "[AGENT NOT RUN: no consent]", platform_abort=True,
-                    abort_reason="consent_required", history_gap=True)]
+                    abort_reason="consent_required", history_gap=True),
+               turn(3, "platform_abort", "[AGENT FAILURE: boom]", platform_abort=True, abort_reason="tool_error")]
         text = report.case_report("Agent evals", {"results": res}, None, AGENT_REASONS)
-        self.assertIn("Platform aborts: 2 (tool_error 1, consent_required 1). Turns with a history gap: 1.", text)
+        self.assertIn("Platform aborts: 3 (tool_error 2, consent_required 1). Turns with a history gap: 1.", text)
         self.assertIn("- `c#1` [platform abort: tool_error]: response does not match /84/", text)
         self.assertIn("- `c#2` [history gap]: [AGENT NOT RUN: no consent]", text)
+        self.assertIn("- `c#3`: [AGENT FAILURE: boom]", text)
 
     def test_results_without_reasons_still_list_their_failures(self):
         text = report.case_report("T", {"results": [r("old", False)]}, None, TOOL_REASONS)

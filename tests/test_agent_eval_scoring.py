@@ -70,14 +70,33 @@ class ScoreTurnTests(unittest.TestCase):
         self.assertEqual(score_turn(c, res([call("a"), call("a")])), [])
         self.assertEqual([f.reason for f in score_turn(c, res([call("a")]))], ["missing_call"])
 
+    def test_unordered_expected_calls_each_need_their_own_call(self):
+        c = case(expected_tool_calls=[{"tool": "t", "params": {"id": "C1"}}, {"tool": "t", "params": {"id": "re:C"}}])
+        self.assertEqual(score_turn(c, res([call("t", id="C1")])),
+                         [("missing_call", "expected call t {'id': 're:C'} not made")])
+        # A broad expectation listed first gives way to a stricter one instead of taking its only call.
+        c = case(expected_tool_calls=[{"tool": "t", "params": {"id": "re:C"}}, {"tool": "t", "params": {"id": "C1"}}])
+        self.assertEqual(score_turn(c, res([call("t", id="C1"), call("t", id="C2")])), [])
+
+    def test_argument_values_compare_as_json(self):
+        c = case(expected_tool_calls=[{"tool": "t", "params": {"flag": True, "n": 1}}])
+        self.assertEqual(score_turn(c, res([call("t", flag=True, n=1.0)])), [])
+        self.assertEqual([f.reason for f in score_turn(c, res([call("t", flag=1, n=1)]))], ["wrong_arguments"])
+
     def test_response_patterns_and_latency(self):
         c = case(pass_criteria="both", expected_response_pattern=r"84\.12", response_must_not_match="sorry", max_latency_ms=50)
         fails = score_turn(c, res([], text="price is 99 sorry", latency=100))
         self.assertEqual([f.reason for f in fails], ["response_mismatch", "forbidden_response", "latency"])
 
-    def test_platform_abort_matches_on_name_only(self):
-        c = case(expected_tool_calls=[{"tool": "t", "params": {"id": "C1"}}])
-        self.assertEqual(score_turn(c, res([{"name": "t", "arguments": None, "output": ""}])), [])
+    def test_platform_abort_fails_the_turn_without_checking_the_reply(self):
+        # The abort note quotes the raw tool error, which must not pass or fail the reply checks.
+        c = case(pass_criteria="both", expected_tool_calls=[{"tool": "t", "params": {"id": "C1"}}],
+                 expected_response_pattern="private", response_must_not_match="C1")
+        note = "[AGENT FAILURE: ...] Customer C1 is privately held"
+        r = {**res([{"name": "t", "arguments": None, "output": ""}], text=note, abort=True), "abort_reason": "tool_error"}
+        self.assertEqual(score_turn(c, r), [("platform_abort", note)])
+        r["tool_calls"][0]["name"] = "u"
+        self.assertEqual([f.reason for f in score_turn(c, r)], ["platform_abort", "missing_call"])
 
     def test_a_turn_the_agent_never_ran_fails_with_the_reason(self):
         # Without the early exit this case would pass vacuously: no forbidden call, no forbidden text.

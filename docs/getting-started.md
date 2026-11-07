@@ -102,10 +102,10 @@ To test a different toolbox endpoint, pass `--endpoint <url>`, or copy `config\t
 .\.venv\Scripts\python scripts\report.py assert results\assert\results\<suite>\<run>
 ```
 
-Expected for the samples: tool tests 12/12 and agent evals 9/9. The `c-private` turn ends in a platform abort (a tool error
-aborts the request; see Troubleshooting) and still passes: the abort message names the tool, so the tool check passes on
-the name alone (the arguments are unknown). ASSERT results are not fixed; the first baseline found real violations
-(e.g. manufacturing data applied to aerospace).
+Expected for the samples: tool tests 12/12 and agent evals 10/10. In the `tool_error` turns (`c-private`,
+`c-unknown-customer`) a tool returns an error, and the agent must explain it without leaking the raw error text. If the
+platform aborts the request instead (see Troubleshooting), those turns fail as `platform_abort`. ASSERT results are not
+fixed; the first baseline found real violations (e.g. manufacturing data applied to aerospace).
 
 Both runners exit 0 when everything passes, 1 when a case fails, and 2 on invalid cases or a setup error. A run with
 failures ends with a line such as `Failed by reason: tool_error 3, assertion 3, missing_tool 1`; the report lists each
@@ -128,7 +128,7 @@ that can register apps and grant admin consent. The first run prints a one-time 
 | 401 from toolbox | `az login` to the right tenant; the token scope must be `https://ai.azure.com/.default` |
 | `FOUNDRY_PROJECT_ENDPOINT` missing | Set it in `.env` |
 | Runner exits with `invalid cases:` | Fix the listed lines; `scripts\validate_eval_jsonl.py` runs the same checks |
-| Agent run returns HTTP 400 `An error occurred invoking 'sample___...'` | Platform behavior: any tool error aborts the whole agent request. The runners record it as `[AGENT FAILURE]` / `platform_abort` |
+| Agent run returns HTTP 400 `An error occurred invoking 'sample___...'` | The platform aborted the request because a tool returned an error, as it did for every tool error through October 2026. The runners record it as `[AGENT FAILURE]` and fail the turn as `platform_abort` |
 | Runner exits 2 with `user consent required`, or turns fail with `[AGENT NOT RUN: ...]` | An OAuth2 connection needs your one-time consent. Open the link printed on the console while signed in as the test user, approve, rerun ([entra.md](entra.md#5-consent)) |
 | `upstream_error` or `tool_listing_failed` | The toolbox couldn't reach or authenticate to the MCP server; the failure text names the tool source and code, such as `HTTP_401` ([entra.md](entra.md#10-troubleshooting)) |
 | Intermittent DNS / connection errors | Transient; the runners retry. Rerun failed ASSERT stages, completed stages are cached |

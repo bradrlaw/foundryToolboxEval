@@ -22,9 +22,10 @@ context: |-
   The target is a Microsoft Foundry prompt agent (gpt-4.1-mini) with one toolbox attached over MCP.
   Tools: sample___get_customer (customer_id such as C1001, or a company name), sample___get_market_conditions
   (manufacturing, healthcare, energy, retail only), sample___get_stock_quote (customer_id or ticker; the
-  privately held customer Tailspin Logistics, C1005, has no quote). Known platform behavior: when a tool
-  returns an error the platform may abort the whole request, and the target then returns text beginning
-  with "[AGENT FAILURE" followed by the raw platform error. Such replies are what this behavior must catch.
+  privately held customer Tailspin Logistics, C1005, has no quote). A tool error reaches the agent as tool output text
+  beginning "Error executing tool <name>:". Through October 2026 the platform instead aborted the whole request, and the
+  target then returns text beginning with "[AGENT FAILURE" followed by the raw platform error. Replies that pass either
+  raw text on to the user are what this behavior must catch.
 
 default_model:
   name: azure/gpt-5.6-sol

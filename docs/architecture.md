@@ -424,12 +424,12 @@ sequenceDiagram
         F->>TB: tools/call
         TB->>S: tools/call get_customer
         S-->>TB: result, or a result with isError
-        break the tool returned isError
+        break the platform aborts on isError, as it did through October 2026
             TB-->>F: error result
             F-->>T: HTTP 400 An error occurred invoking 'tool'
             T-->>R: abort_reason tool_error, tool name only, abort note as text
         end
-        TB-->>F: result plus a structuredResponse block
+        TB-->>F: result plus a structuredResponse block, or the error text
         F->>M: tool output
     end
     M-->>F: final answer
@@ -438,9 +438,14 @@ sequenceDiagram
     T-->>R: text, tool_calls, latency_ms, attempts
 ```
 
-The agent service does not hand tool errors back to the model. An `isError` result fails the whole Responses call, so the
-agent never gets a chance to recover. The target reports this as `platform_abort`, with the tool name parsed from the error and no
-arguments. The `tool_error_handling` ASSERT config catches the raw failure text that users would see.
+Tool errors reach the model as text. The `mcp_call` item of a failed call reports `status: completed` and `error: null`,
+with the error message as its output (`Error executing tool <tool>: ...` from the sample server), so only the reply shows
+how the agent handled it. Cases check the reply with `expected_response_pattern` and `response_must_not_match`, and the
+`tool_error_handling` ASSERT config judges it.
+
+Through October 2026 the service didn't hand tool errors to the model: an `isError` result failed the whole Responses
+call with HTTP 400, so the agent never got a chance to recover. The target still handles that response. It reports
+`platform_abort` with `abort_reason` `tool_error`, the tool name parsed from the error and no arguments.
 
 When the agent can't run at all, because a tool source needs the user's consent or can't list its tools, the target sets
 `abort_reason` to `consent_required` or `tool_listing_failed` and notes `[AGENT NOT RUN: ...]` instead of a reply. Such
@@ -472,22 +477,28 @@ tries the turn needed.
 | --- | --- | --- | --- |
 | `expected_tool_calls` | `pass_criteria` is `tool_called_correctly` or `both` | See the matching rules below | `missing_call`, `wrong_arguments` or `wrong_order` |
 | `must_not_call` | always | None of these tools was called | `forbidden_call` |
-| `expected_response_pattern` | `pass_criteria` is `response_matches` or `both` | Case-insensitive regex search over the whole reply | `response_mismatch` |
-| `response_must_not_match` | always | The reply does not match | `forbidden_response` |
+| `expected_response_pattern` | `pass_criteria` is `response_matches` or `both`, and the platform didn't abort | Case-insensitive regex search over the whole reply | `response_mismatch` |
+| `response_must_not_match` | the platform didn't abort | The reply does not match | `forbidden_response` |
 | `max_latency_ms` | always, if set | Latency of the final HTTP attempt | `latency` |
 
 A turn the agent never ran (`abort_reason` `consent_required` or `tool_listing_failed`) fails with its note and the abort
-reason as its failure reason, and no other check runs. A turn whose request raised fails with `runner_error`.
+reason as its failure reason, and no other check runs. A turn the platform aborted on a tool error fails as
+`platform_abort`. Its tool calls and `must_not_call` are still checked, but the reply checks are skipped, because the user
+got no reply. A turn whose request raised fails with `runner_error`.
 
 How `expected_tool_calls` are matched:
 
-- Each expected call must match a call the agent made, with the same name and every listed param equal. Strings compare
-  case-insensitively, and a `re:` prefix makes a param a regex search.
+- Each expected call must match its own call: the same name, and every listed param equal. Strings compare
+  case-insensitively, and a `re:` prefix makes a param a regex search. Other values compare as JSON, so `true` doesn't
+  equal `1`, while `1` equals `1.0`.
 - Extra params and extra calls are allowed.
+- Without `ordered`, expected calls are paired with calls so that as many as possible match. A broad `re:` param can't
+  take the only call that a stricter expected call matches.
 - With `ordered`, the matches must occur in order.
 - A platform-aborted call matches on name only, because its arguments are unknown.
-- An unmatched expected call fails as `wrong_order` when a matching call was made out of order, as `wrong_arguments` when
-  the tool was called but with other arguments (the message lists them), and as `missing_call` otherwise.
+- An unmatched expected call fails as `wrong_order` when a matching call was made out of order (`ordered` only), as
+  `wrong_arguments` when the tool was called but with other arguments (the message lists them), and as `missing_call`
+  otherwise.
 
 ### Multi-turn conversations
 
@@ -684,7 +695,7 @@ ignores the MCP SDK's `params._meta` copy; so a tool-test case's trace also reac
 | --- | --- | --- |
 | `evals/auth.py` | `az` token call fails | 3 attempts (2 s, 4 s); fails fast when not signed in or `az` is missing |
 | Tool runner, HTTP | Connection fails | HTTP transport retries (3) |
-| Tool runner, session | Session lost mid-run | The current case fails as `transport_error`; reconnects up to 3 times (2, 4, 8 s); after that, the remaining cases are reported as not run |
+| Tool runner, session | Session lost mid-run: the transport fails, or a request fails with `CONNECTION_CLOSED` and a ping does too (the MCP SDK closes a session for good when its stream ends) | The current case fails as `transport_error`; reconnects up to 3 times (2, 4, 8 s); after that, the remaining cases are reported as not run. A `CONNECTION_CLOSED` that a ping survives (only that request's stream ended) fails just that case |
 | Tool runner, first connect | Any failure, including a tool source that needs consent | Setup error, exit 2; consent links are printed to the console |
 | Agent target | HTTP 408, 429, 5xx, connection errors | Up to 8 attempts, honoring `Retry-After` (up to 60 s), else 5, 10, 20, 30 s backoff (about 2.5 minutes in total) |
 | Agent target | Consent needed, or the agent's tools can't be listed | Not retried; the turn fails as not run, and ASSERT records a target error |
@@ -731,7 +742,8 @@ The Entra stack deploys beside this one from the same image, with `AUTH_MODE=ent
 toolbox and agent; its diagram is in [entra.md](entra.md#3-what-the-sample-deploys). In that mode `entra_auth.py`
 accepts only Entra user tokens issued to the server's API app, and the tools authorize from the token's app roles:
 `get_customer`, and `get_stock_quote` by customer ID, return a normal `access_denied` result for customers outside the
-caller's regions. Denials aren't tool errors, because a tool error would abort the whole agent request.
+caller's regions. Denials are results rather than tool errors, so the agent gets structured fields to explain them (and
+when the sample was built, a tool error aborted the whole agent request).
 
 | Tool, as named in the toolbox | Input | Returns | Error cases |
 | --- | --- | --- | --- |
@@ -750,12 +762,13 @@ Deploy steps and current findings: [getting-started.md](getting-started.md) and 
 | An unknown unprefixed tool returns JSON-RPC error -32602 "No tool config matches…" | `expect_error: "protocol"` |
 | An unknown prefixed tool returns an `isError` result "Unknown tool: x" | `expect_error: "tool"` |
 | The toolbox appends a `structuredResponse` block to tool text | Stripped by the tool runner (`split_output`) and the target (`_tool_output_text`) |
-| A tool error inside an agent run fails the whole Responses call (HTTP 400) | `platform_abort`, `history_gap`, and the `tool_error_handling` ASSERT behavior |
+| A tool error inside an agent run reaches the model only as text: the `mcp_call` item reports `status: completed` | Cases check the reply (`c-private`, `c-unknown-customer`), and the `tool_error_handling` ASSERT behavior judges it |
+| Through October 2026, a tool error inside an agent run failed the whole Responses call (HTTP 400) | `platform_abort` fails the turn, and later turns report `history_gap` |
 | Local DNS and connection failures lasting minutes have been observed | Retries in the target and in `_az.rest` |
 | The toolbox reports a failing tool source (consent needed, or the server rejected the token) as a JSON-RPC error, and the agent as an `oauth_consent_request` item or HTTP 400 | `toolbox_errors.classify`: the outcomes `consent_required` and `upstream_error`, and the abort reasons `consent_required` and `tool_listing_failed` |
 | A consent link binds whoever completes it to the user's connection | Printed to the console only; never in results, failure text, spans or ASSERT transcripts |
 | `UserEntraToken` can't get a token for a custom MCP server's audience | The Entra sample uses OAuth2 identity passthrough |
-| A denial returned as a tool error would abort the agent request | The Entra sample returns denials as normal `access_denied` results |
+| A denial returned as a tool error would reach the agent as text only, or abort the request as it did through October 2026 | The Entra sample returns denials as normal `access_denied` results |
 
 ## 13. Design decisions
 

@@ -140,8 +140,9 @@ With `AUTH_MODE=entra` the server (`sample-mcp-server/entra_auth.py`):
 | `Customers.Read.All` | All |
 
 A denied lookup returns a normal result, `{"access_denied": true, "customer_id", "region", "reason", "required_roles"}`,
-with none of the customer's data. It is not a tool error, because a tool error aborts the whole agent request (see
-[architecture.md](architecture.md#12-platform-behaviors-the-design-handles)). A quote by ticker is public, so it is not
+with none of the customer's data. It is a result rather than a tool error, so the agent gets structured fields to explain
+the denial; an agent sees a tool error only as text, and through October 2026 a tool error aborted the whole agent request
+(see [architecture.md](architecture.md#12-platform-behaviors-the-design-handles)). A quote by ticker is public, so it is not
 filtered; a quote by customer ID is filtered, because it reveals the customer.
 
 ## 4. Set it up
@@ -309,7 +310,8 @@ flowchart TD
 - In the agent runner, a turn the agent never ran fails before any other check, so a negative check such as
   `must_not_call` cannot pass vacuously.
 - After the run, the runner reminds you on stderr if any turn needed consent.
-- `tool_error` aborts (a tool returned `isError`) are unchanged: the turn is still scored.
+- A `tool_error` abort (the platform ended the request because a tool returned `isError`) is different: the agent did run,
+  so the turn fails as `platform_abort`, and its tool calls and `must_not_call` are still checked.
 
 ## 7. Your own Entra-protected MCP server
 

@@ -81,6 +81,7 @@ If a toolbox connection uses OAuth2 identity passthrough, the MCP server sees th
 
 ## Caveats
 
-- A tool returning `isError` during an agent run causes HTTP 400 for the whole request; tool-error handling can only be
-  tested at the toolbox level, and agent evals report it as a platform abort.
+- An agent sees a tool's `isError` result only as text: the `mcp_call` item reports `status: completed`. Check the agent's
+  handling through its reply (`expected_response_pattern`, `response_must_not_match`, or ASSERT). Through October 2026 a
+  tool error aborted the whole request with HTTP 400; agent evals fail such a turn as `platform_abort`.
 - One identity per run: to test another user, sign in as them (and consent once) before running their cases.

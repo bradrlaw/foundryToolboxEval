@@ -68,6 +68,15 @@ class ToolCaseTests(unittest.TestCase):
             path.write_text("{not json}\n", encoding="utf-8")
             self.assertIn("invalid JSON", check_files([path], "tool")[1][0])
 
+    def test_a_file_that_is_not_utf8_is_a_problem_not_a_crash(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "cases.jsonl"
+            path.write_bytes(json.dumps(call(tool="caf\xe9"), ensure_ascii=False).encode("cp1252"))
+            cases, problems = check_files([path], "tool")
+        self.assertEqual(cases, {})
+        self.assertEqual(len(problems), 1)
+        self.assertIn("cannot read: 'utf-8' codec can't decode", problems[0])
+
 
 class AgentCaseTests(unittest.TestCase):
     def test_valid_turn(self):

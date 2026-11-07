@@ -27,7 +27,7 @@ from azure.core.exceptions import ClientAuthenticationError
 from dotenv import load_dotenv
 
 from evals import auth, telemetry
-from evals.cases import ROOT, CaseError, fill_caller, load_cases
+from evals.cases import ROOT, CaseError, fill_caller, json_equal, load_cases
 from evals.reasons import Failure, summary_line
 from evals.toolbox_errors import AGENT_NOT_RUN
 
@@ -39,20 +39,41 @@ def _value_matches(expected, actual) -> bool:
         if expected.startswith("re:"):
             return re.search(expected[3:], actual, re.I) is not None
         return expected.strip().lower() == actual.strip().lower()
-    return expected == actual
+    return json_equal(expected, actual)
 
 
 def _call_matches(expected: dict, actual: dict) -> bool:
     if actual["name"] != expected["tool"]:
         return False
-    if actual.get("arguments") is None:  # platform abort: only the tool name is known
+    if actual.get("arguments") is None:  # platform abort: only the tool name is known; the turn fails anyway
         return True
     args = actual["arguments"]
     return all(k in args and _value_matches(v, args[k]) for k, v in expected.get("params", {}).items())
 
 
+def _pair_unordered(expected: list[dict], calls: list[dict]) -> dict[int, int]:
+    """Pair as many expected calls as possible with distinct actual calls: {expected index: call index}.
+
+    Augmenting paths, so an earlier expectation that a broad `re:` param lets take any call gives way to a
+    later, stricter one."""
+    owner: dict[int, int] = {}  # call index -> expected index
+
+    def place(e: int, tried: set[int]) -> bool:
+        for i, c in enumerate(calls):
+            if i not in tried and _call_matches(expected[e], c):
+                tried.add(i)
+                if i not in owner or place(owner[i], tried):
+                    owner[i] = e
+                    return True
+        return False
+
+    for e in range(len(expected)):
+        place(e, set())
+    return {e: i for i, e in owner.items()}
+
+
 def _missed(expected: dict, calls: list[dict], used: set[int]) -> Failure:
-    """Why no call matched an expected call. `used` holds calls that ordered matching already consumed."""
+    """Why no call matched an expected call. `used` holds calls that other expected calls already took."""
     what = f"expected call {expected['tool']} {expected.get('params', {})}"
     if any(i not in used and _call_matches(expected, c) for i, c in enumerate(calls)):
         return Failure("wrong_order", f"{what} made out of order")
@@ -71,27 +92,35 @@ def score_turn(case: dict, result: dict) -> list[Failure]:
     calls = result["tool_calls"]
     criteria = case["pass_criteria"]
     failures: list[Failure] = []
+    if result.get("platform_abort"):
+        # A tool error ended the whole request, so the user got no reply: response checks are skipped.
+        failures.append(Failure("platform_abort", result["text"]))
 
     if criteria in ("tool_called_correctly", "both"):
-        pos, used = 0, set()
-        for exp in case["expected_tool_calls"]:
-            start = pos if case.get("ordered") else 0
-            idx = next((i for i in range(start, len(calls)) if _call_matches(exp, calls[i])), None)
-            if idx is None:
-                failures.append(_missed(exp, calls, used))
-            elif case.get("ordered"):
-                used.add(idx)
-                pos = idx + 1
+        expected = case["expected_tool_calls"]
+        if case.get("ordered"):
+            pos, used = 0, set()
+            for exp in expected:
+                idx = next((i for i in range(pos, len(calls)) if _call_matches(exp, calls[i])), None)
+                if idx is None:
+                    failures.append(_missed(exp, calls, used))
+                else:
+                    used.add(idx)
+                    pos = idx + 1
+        else:
+            pairs = _pair_unordered(expected, calls)
+            used = set(pairs.values())
+            failures += [_missed(exp, calls, used) for e, exp in enumerate(expected) if e not in pairs]
     for name in case.get("must_not_call", []):
         if any(c["name"] == name for c in calls):
             failures.append(Failure("forbidden_call", f"forbidden tool {name} was called"))
 
-    if criteria in ("response_matches", "both"):
+    if criteria in ("response_matches", "both") and not result.get("platform_abort"):
         pattern = case.get("expected_response_pattern")
         if pattern and not re.search(pattern, result["text"], re.I | re.S):
             failures.append(Failure("response_mismatch", f"response does not match /{pattern}/"))
     bad = case.get("response_must_not_match")
-    if bad and re.search(bad, result["text"], re.I | re.S):
+    if bad and not result.get("platform_abort") and re.search(bad, result["text"], re.I | re.S):
         failures.append(Failure("forbidden_response", f"response matches forbidden /{bad}/"))
 
     if (limit := case.get("max_latency_ms")) and result["latency_ms"] > limit:

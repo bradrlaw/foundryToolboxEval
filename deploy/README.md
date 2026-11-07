@@ -31,10 +31,15 @@ The Entra stack ([docs/entra.md](../docs/entra.md)) runs beside it:
 - Tool errors from the MCP server surface as `isError: true` with the original message, and so do missing or wrong-type
   arguments (with the validation message).
 
-- **A tool error aborts the whole agent request.** When an MCP tool returns `isError: true` while an agent is calling it through the toolbox,
-  the Responses API returns HTTP 400 (`An error occurred invoking 'sample___...'`) instead of giving the error to the model.
-  The agent cannot say "that customer was not found"; callers must handle the 400. Direct toolbox calls are unaffected (tool tests see `isError`).
-  The ASSERT target reports this as an `[AGENT FAILURE ...]` reply so it is scored.
+- **Tool errors reach the model as text.** When an MCP tool returns `isError: true` while an agent is calling it through
+  the toolbox, the model gets the error message (`Error executing tool get_stock_quote: Customer C1005 ... is privately
+  held; ...`) as the tool output and can explain it to the user. The `mcp_call` output item still reports
+  `status: completed` and `error: null`, so only the text shows that the call failed. Direct toolbox calls are unaffected
+  (tool tests see `isError`).
+- **Through October 2026 a tool error aborted the whole agent request.** The Responses API returned HTTP 400
+  (`An error occurred invoking 'sample___...'`) instead of giving the error to the model, so the user got no reply. The
+  runners still handle it: the agent runner fails the turn as `platform_abort`, and the ASSERT target returns an
+  `[AGENT FAILURE ...]` reply for the judge to score.
 - Responses API calls can hit transient DNS errors; the target retries connection errors, 408, 429 and 5xx (honoring `Retry-After`).
 
 ## Entra findings

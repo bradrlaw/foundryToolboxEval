@@ -55,11 +55,20 @@ class NoTokenTestCase(unittest.TestCase):
         self.addCleanup(patcher.stop)
 
 
+class PingClient:
+    def __init__(self, ping_error=None):
+        self.ping_error = ping_error
+
+    async def send_ping(self):
+        if self.ping_error:
+            raise self.ping_error
+
+
 class ClassificationTests(NoTokenTestCase):
-    def classify(self, error, http=(), earlier=()):
+    def classify(self, error, http=(), earlier=(), ping_error=None):
         errors = run.HttpErrors()
         errors.seen += earlier
-        tb = run.Toolbox(client=None, http_errors=errors, target=TARGET)
+        tb = run.Toolbox(client=PingClient(ping_error), http_errors=errors, target=TARGET)
 
         async def request():
             errors.seen.extend(http)
@@ -78,6 +87,15 @@ class ClassificationTests(NoTokenTestCase):
         self.assertEqual((o.outcome, o.text), ("transport_error", "HTTP 503: busy"))
         for code in (REQUEST_TIMEOUT, CONNECTION_CLOSED):
             self.assertEqual(self.classify(MCPError(code, "x")).outcome, "transport_error")
+
+    def test_connection_closed_is_a_lost_session_only_if_a_ping_fails_the_same_way(self):
+        # The SDK raises CONNECTION_CLOSED when one request's response stream ends, and for every request once
+        # the session's own stream has ended.
+        closed = MCPError(CONNECTION_CLOSED, "Connection closed")
+        self.assertEqual(self.classify(closed, ping_error=MCPError(-32601, "no ping")).outcome, "transport_error")
+        with self.assertRaises(run.SessionLost) as ctx:
+            self.classify(closed, ping_error=closed)
+        self.assertEqual(str(ctx.exception), f"MCP error {CONNECTION_CLOSED}: Connection closed")
 
     def test_http_errors_from_earlier_requests_are_ignored(self):
         o = self.classify(MCPError(INVALID_PARAMS, "bad"), earlier=[run.HttpError(503, "old", jsonrpc=False)])
@@ -174,7 +192,7 @@ class RunAllTests(NoTokenTestCase):
         self.addCleanup(patcher.stop)
         self.connects = 0
 
-    def run_all(self, cases, run_case, connect_failures=(), connect_error=None):
+    def run_all(self, cases, run_case, connect_failures=(), connect_error=None, toolbox=None):
         @contextlib.asynccontextmanager
         async def fake_connect(target, http_errors):
             self.connects += 1
@@ -183,7 +201,7 @@ class RunAllTests(NoTokenTestCase):
                     raise connect_error
                 http_errors.seen.append(run.HttpError(401, "denied", jsonrpc=False))
                 raise ExceptionGroup("tg", [MCPError(INTERNAL_ERROR, "Server returned an error response")])
-            yield FakeToolbox()
+            yield toolbox(http_errors) if toolbox else FakeToolbox()
 
         with mock.patch.object(run, "connect", fake_connect), mock.patch.object(run, "run_case", run_case), \
                 contextlib.redirect_stderr(io.StringIO()):
@@ -204,6 +222,32 @@ class RunAllTests(NoTokenTestCase):
         self.assertEqual(results[1]["reasons"], ["transport_error"])
         self.assertEqual(results[1]["outcomes"], {"transport_error": 1})
         self.assertEqual((self.connects, info["protocol_version"]), (2, "2025-11-25"))
+
+    def test_closed_session_reconnects_and_runs_the_remaining_cases(self):
+        closed = MCPError(CONNECTION_CLOSED, "Connection closed")
+
+        class Client(PingClient):  # the first session closes after one call, as the SDK does at stream EOF
+            protocol_version, server_info = "2025-11-25", None
+
+            def __init__(self, calls_before_close):
+                super().__init__()
+                self.calls_left = calls_before_close
+
+            async def call_tool(self, name, arguments):
+                if self.calls_left == 0:
+                    self.ping_error = closed
+                    raise closed
+                self.calls_left -= 1
+                return SimpleNamespace(content=[SimpleNamespace(type="text", text="{}")],
+                                       structured_content=None, is_error=False)
+
+        def toolbox(http_errors):
+            return run.Toolbox(Client(1 if self.connects == 1 else 99), http_errors, TARGET)
+
+        results, _ = self.run_all([case("a"), case("b"), case("c")], run.run_case, toolbox=toolbox)
+        self.assertEqual([(r["case_id"], r["passed"]) for r in results], [("a", True), ("b", False), ("c", True)])
+        self.assertEqual(results[1]["failures"], [f"session lost: MCP error {CONNECTION_CLOSED}: Connection closed"])
+        self.assertEqual((results[1]["reasons"], self.connects), (["transport_error"], 2))
 
     def test_gives_up_after_max_reconnects(self):
         async def run_case(tb, c):

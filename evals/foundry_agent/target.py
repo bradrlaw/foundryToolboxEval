@@ -145,8 +145,10 @@ def run_agent(messages: list[dict[str, str]]) -> dict:
     retry waits).
 
     Findings, reported as platform_abort=True with an abort_reason:
-    - tool_error: a toolbox tool error fails the whole Responses call with HTTP 400, so the model never
-      sees it. The tool name is recovered from the error message.
+    - tool_error: the platform failed the whole Responses call with HTTP 400 because a toolbox tool returned
+      an error, so the model never saw it. This happened for every tool error through October 2026; since
+      November 2026 the model gets the error text as the tool output instead. The tool name is recovered
+      from the error message.
     - consent_required: a tool source uses OAuth identity passthrough and the signed-in user has not
       consented. The response completes with an oauth_consent_request item instead of a reply; the
       consent link goes to the console only.

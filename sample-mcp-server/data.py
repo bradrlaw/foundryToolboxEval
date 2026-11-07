@@ -65,8 +65,9 @@ def visible_regions(roles) -> list[str]:
 def access_denied(customer: dict, roles) -> dict | None:
     """None if the roles cover the customer's region, otherwise a denial result.
 
-    The denial is a normal tool result rather than an error: a tool error aborts the whole
-    agent response in Foundry, while a result lets the agent explain the denial to the user.
+    The denial is a normal tool result rather than an error, so the agent gets structured fields to explain
+    it to the user. A Foundry agent sees a tool error only as text, and through October 2026 a tool error
+    aborted the whole agent response.
     """
     region = customer["region"]
     if region in visible_regions(roles):
