@@ -5,15 +5,27 @@ All three runners emit spans to Application Insights when a connection string is
 ## 1. Get an App Insights resource
 
 A Foundry project usually has one connected (Foundry portal → project → **Tracing**, or Management center → Connected
-resources). Otherwise create one and connect it:
+resources). Otherwise create a workspace-based one:
 
 ```powershell
-az monitor app-insights component create -a <name> -g <rg> -l <region> --kind web   # needs: az extension add -n application-insights
+az monitor log-analytics workspace create -n <workspace> -g <rg> -l <region>
+az monitor app-insights component create -a <name> -g <rg> -l <region> --kind web --workspace <workspace-resource-id>   # needs: az extension add -n application-insights
 az resource show --ids <appinsights-resource-id> --query properties.ConnectionString -o tsv
 ```
 
-If the portal already connects one to the project, Foundry's own service spans (`responsesapi`: `invoke_agent`, `chat <model>`,
-`execute_tool`) land in it too.
+Then connect it to the project (portal: project → **Tracing**), so Foundry's own spans land in it too: the agent service's
+(`responsesapi`: `invoke_agent`, `chat <model>`, `execute_tool`) and the toolbox's (`agentsv2`). Without the portal, put this
+project connection body in `conn.json`:
+
+```json
+{"properties": {"category": "AppInsights", "authType": "ApiKey", "target": "<appinsights-resource-id>", "isSharedToAll": false,
+  "credentials": {"key": "<connection string>"}, "metadata": {"ApiType": "Azure", "ResourceId": "<appinsights-resource-id>"}}}
+```
+
+```powershell
+az rest --method put --body "@conn.json" --url "https://management.azure.com/subscriptions/<sub>/resourceGroups/<rg>/providers/Microsoft.CognitiveServices/accounts/<resource>/projects/<project>/connections/<name>?api-version=2025-06-01"
+Remove-Item conn.json   # it holds the connection string
+```
 
 ## 2. Configure
 
@@ -31,10 +43,11 @@ Run the runners with the venv python (it has `azure-monitor-opentelemetry-export
 
 | Cloud role | Spans |
 | --- | --- |
-| `foundry-toolbox-tests` | `toolbox.test_case` (`eval.case_id`, `eval.kind`, `eval.category`, `gen_ai.tool.name`, `eval.passed`, `eval.outcome`, `eval.latency_p50_ms`, `eval.failures`, `eval.reasons`) |
+| `foundry-toolbox-tests` | `toolbox.test_case` (`eval.case_id`, `eval.kind`, `eval.category`, `gen_ai.tool.name`, `eval.passed`, `eval.outcome`, `eval.latency_p50_ms`, `eval.failures`, `eval.reasons`), with the MCP SDK's `MCP send <method>` spans as children |
 | `foundry-agent-evals` | `eval.turn` (`eval.conversation_id`, `eval.turn_number`, `eval.category`, `eval.passed`, `eval.failures`, `eval.reasons`), with the target's `foundry_agent` and `tool:*` spans as children |
 | `foundry-agent-target` | `foundry_agent` (`gen_ai.agent.name`, `eval.platform_abort`, `eval.abort_reason`) and `tool:*` (`gen_ai.tool.name`), when ASSERT runs the target or it runs on its own |
 | `responsesapi` (Foundry) | `invoke_agent`, `chat <model>`, `execute_tool` with real tool durations |
+| `agentsv2` (Foundry toolbox) | Requests, in `requests`: `tools/call <tool>` and `tools/list <toolbox>:<version>` (`gen_ai.tool.name`, `gen_ai.tool.call.arguments`, `microsoft.foundry.toolbox.name`, `microsoft.foundry.toolbox.version`, `error.type`, `rpc.response.status_code`). `resultCode` is `0`, or `500` when the call fails (`error.type` `tool_error` or `json_rpc_error`) |
 
 A process has one cloud role, set by the first module to install the tracer provider. Under `run_agent_evals` that is the
 runner, so the target's spans carry `foundry-agent-evals`.
@@ -47,14 +60,20 @@ true ([entra.md](entra.md#failures-specific-to-identity)).
 
 Consent links never appear in spans. Identity cases can put the test user's object ID, name or username into span
 attributes: agent replies in `output.value`, and failure messages with filled-in `{{caller.*}}` values in `eval.failures`.
+The toolbox's requests record every tool call's arguments (`gen_ai.tool.call.arguments`) and the tenant, subscription and
+project IDs.
 
 The target injects a W3C `traceparent` into the Responses call, so server spans share the `operation_Id` of the eval turn
-and you can see one trace from eval turn to model and tool calls. Tool spans created by the target are zero-duration
-markers; use the server-side `execute_tool` spans for tool latency.
+and you can see one trace from eval turn to model and tool calls, including the toolbox's requests. Tool spans created by
+the target are zero-duration markers; use the server-side spans for tool latency: `execute_tool` is the agent's view (it
+includes Foundry's overhead), the toolbox's `tools/call` request the tool's.
+
+Direct tool-test calls aren't linked: the MCP SDK sends its trace context in `params._meta`, which the toolbox ignores, so
+each of its requests starts a new trace. The toolbox does continue a W3C `traceparent` HTTP header.
 
 ## 4. Query
 
-Portal → App Insights → Logs (spans are in `dependencies`):
+Portal → App Insights → Logs (spans are in `dependencies`, the toolbox's requests in `requests`):
 
 ```kusto
 // eval pass rate by day
@@ -74,12 +93,17 @@ dependencies | where name in ("toolbox.test_case", "eval.turn") and tostring(cus
 dependencies | where cloud_RoleName == "responsesapi" and name startswith "execute_tool"
 | summarize p50=percentile(duration,50), p95=percentile(duration,95), n=count() by name
 
+// toolbox latency and failures by tool, from all callers
+requests | where cloud_RoleName == "agentsv2" and name startswith "tools/call"
+| summarize p50=percentile(duration,50), p95=percentile(duration,95), n=count(), failed=countif(success == false)
+    by tool=tostring(customDimensions["gen_ai.tool.name"])
+
 // agent requests that aborted or never ran, by reason
 dependencies | where name == "foundry_agent" and tostring(customDimensions["eval.platform_abort"]) =~ "true"
 | summarize n=count() by reason=tostring(customDimensions["eval.abort_reason"]), bin(timestamp, 1d)
 
 // full trace for one eval turn
-dependencies | where operation_Id == "<id>" | project timestamp, cloud_RoleName, name, duration | order by timestamp asc
+union dependencies, requests | where operation_Id == "<id>" | project timestamp, cloud_RoleName, name, duration | order by timestamp asc
 ```
 
 From the CLI:

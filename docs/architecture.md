@@ -641,7 +641,7 @@ target's spans from it. Spans are exported only when `APPLICATIONINSIGHTS_CONNEC
 ```mermaid
 flowchart LR
     subgraph local["Eval process"]
-        tc["toolbox.test_case"]
+        tc["toolbox.test_case"] --> send["MCP send method<br/>MCP SDK span"]
         turn["eval.turn"] --> fa["foundry_agent<br/>AGENT span"]
         fa --> tool["tool:name<br/>TOOL span, zero-duration marker"]
     end
@@ -649,23 +649,31 @@ flowchart LR
         inv["invoke_agent"] --> chat["chat model"]
         inv --> exec["execute_tool"]
     end
+    subgraph tbx["Foundry toolbox, cloud role agentsv2"]
+        req["tools/call, tools/list<br/>requests"]
+    end
     fa -.->|"W3C traceparent header"| inv
-    local -->|"BatchSpanProcessor and<br/>AzureMonitorTraceExporter"| appi[("Application Insights<br/>dependencies table")]
+    exec -.->|"same trace"| req
+    send -.->|"params._meta context ignored,<br/>new trace"| req
+    local -->|"BatchSpanProcessor and<br/>AzureMonitorTraceExporter"| appi[("Application Insights<br/>dependencies and requests tables")]
     server -->|"if the project is connected<br/>to the same resource"| appi
+    tbx -->|"same connection"| appi
 ```
 
 The first entry point to install the tracer provider sets the cloud role:
 
 | Run | Cloud role | Spans |
 | --- | --- | --- |
-| Tool tests | `foundry-toolbox-tests` | `toolbox.test_case` |
+| Tool tests | `foundry-toolbox-tests` | `toolbox.test_case`, with the MCP SDK's `MCP send <method>` spans as children |
 | Deterministic agent evals | `foundry-agent-evals` | `eval.turn`, with the target's `foundry_agent` and `tool:*` spans as children |
 | ASSERT, or the target run on its own | `foundry-agent-target` | `foundry_agent`, `tool:*` |
 
 `OTEL_SERVICE_NAME` overrides all three. Because the target injects `traceparent`, Foundry's server spans share the eval
-turn's `operation_Id`, so one trace runs from the eval turn through the model and tool calls. Use the server-side
-`execute_tool` spans for real tool latency. The `foundry_agent` span carries `eval.platform_abort` and `eval.abort_reason`;
-consent links never reach a span.
+turn's `operation_Id`, so one trace runs from the eval turn through the model and tool calls, down to the toolbox's
+`agentsv2` requests. Use the server-side spans for real tool latency: `execute_tool` for the agent's view, the toolbox's
+`tools/call` requests for the tool's. Direct tool-test calls start new traces at the toolbox, which ignores the MCP SDK's
+`params._meta` context ([telemetry.md](telemetry.md#3-what-is-emitted)). The `foundry_agent` span carries
+`eval.platform_abort` and `eval.abort_reason`; consent links never reach a span.
 
 ## 10. Reliability
 
