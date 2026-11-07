@@ -170,6 +170,17 @@ class RunAgentTests(unittest.TestCase):
                     target.chat("hi")
             self.assertEqual((out["abort_reason"], out["text"], out["tool_calls"]), (reason, text, []))
 
+    def test_a_tool_call_the_toolbox_could_not_make_aborts_with_its_error(self):
+        message = (f"{target.CALL_FAILED} sample___whoami: Request failed (remote): Remote MCP server error while "
+                   "calling tool whoami: The server does not support the requested protocol version '2026-07-28'.")
+        body = json.dumps({"error": {"type": "invalid_request_error", "code": "tool_user_error", "message": message}})
+        err = target.ResponsesAPIError(400, body, 12000.0, 1)
+        with mock.patch.object(target, "_post_responses", side_effect=err):
+            out = target.run_agent([{"role": "user", "content": "who am I?"}])
+            self.assertEqual(target.chat("who am I?"), f"{target.CALL_FAILED_NOTE} {message}")  # the judge sees it
+        self.assertEqual((out["platform_abort"], out["abort_reason"], out["latency_ms"]), (True, "tool_call_failed", 12000.0))
+        self.assertEqual(out["tool_calls"], [{"name": "sample___whoami", "arguments": None, "output": message}])
+
     def test_other_api_errors_propagate(self):
         err = target.ResponsesAPIError(401, "denied", 1.0)
         with mock.patch.object(target, "_post_responses", side_effect=err), self.assertRaises(target.ResponsesAPIError):

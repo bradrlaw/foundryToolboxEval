@@ -49,8 +49,9 @@ az containerapp create -n sample-mcp -g rg-toolbox-eval-sample --environment sam
   --target-port 8000 --ingress external --min-replicas 1
 ```
 
-The MCP URL is `https://<app-fqdn>/mcp`. It is unauthenticated, so use only synthetic data. `--min-replicas 1` keeps one
-replica running, so latency checks don't measure cold starts; leave it out to let the app scale to zero between runs.
+The MCP URL is `https://<app-fqdn>/mcp`. It is unauthenticated, so use only synthetic data. Keep `--min-replicas 1`: an
+app that scales to zero takes about 20 s to start, the toolbox fails agent requests in that window, and latency checks
+would measure the start ([findings](../deploy/README.md#findings)). The replica is billed at the idle rate between runs.
 
 ## 4. Create the connection and toolbox
 
@@ -131,6 +132,8 @@ that can register apps and grant admin consent. The first run prints a one-time 
 | Agent run returns HTTP 400 `An error occurred invoking 'sample___...'` | The platform aborted the request because a tool returned an error, as it did for every tool error through October 2026. The runners record it as `[AGENT FAILURE]` and fail the turn as `platform_abort` |
 | Runner exits 2 with `user consent required`, or turns fail with `[AGENT NOT RUN: ...]` | An OAuth2 connection needs your one-time consent. Open the link printed on the console while signed in as the test user, approve, rerun ([entra.md](entra.md#5-consent)) |
 | `upstream_error` or `tool_listing_failed` | The toolbox couldn't reach or authenticate to the MCP server; the failure text names the tool source and code, such as `HTTP_401` ([entra.md](entra.md#10-troubleshooting)) |
+| Agent turns fail as `tool_listing_failed` or `tool_call_failed`, and the error names protocol version `2026-07-28` | The MCP server was starting from zero. Keep `--min-replicas 1` ([findings](../deploy/README.md#findings)) |
+| Every tool call times out (`transport_error`: `Request 'tools/call' timed out`) | The toolbox gets no answer from the MCP server. Check its replicas with `az containerapp replica list`: a container that stays not ready is stuck starting. A new revision replaced one ([findings](../deploy/README.md#findings)) |
 | Intermittent DNS / connection errors | Transient; the runners retry. Rerun failed ASSERT stages, completed stages are cached |
 | ASSERT writes into site-packages | Run configs through `scripts\run_assert.py`, which sets an absolute `artifacts_root` |
 | ASSERT judge output truncated | Keep `max_tokens: 24000` for the judge |

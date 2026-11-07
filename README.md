@@ -91,8 +91,9 @@ its calls or none are known), `tool_calls`, `response`, `latency_ms` (the final 
 (the whole request, including retries and their waits), `attempts` (HTTP tries, including retries), what served the turn
 (`response_id`, `agent_version`, `model` and token `usage`), `platform_abort` with its `abort_reason`, and `history_gap`:
 an earlier turn got no answer (error or abort), so this turn's history lacks that reply. Abort reasons: `tool_error` (the platform ended the request because a tool returned
-an error; the turn fails as `platform_abort`, and its tool calls are still checked), and `consent_required` or
-`tool_listing_failed` (the agent never ran, so the turn fails).
+an error) and `tool_call_failed` (because the toolbox couldn't make a call, as when the MCP server is starting from
+zero); both fail the turn as `platform_abort`, and its tool calls are still checked. `consent_required` or
+`tool_listing_failed`: the agent never ran, so the turn fails.
 Failure reasons: `missing_call`, `wrong_arguments`, `wrong_order`, `forbidden_call`, `extra_calls`, `response_mismatch`,
 `forbidden_response`, `latency`, `platform_abort` and `runner_error` (no reply), or the abort reason of a turn the agent
 never ran. Unordered expected calls are paired with distinct calls, and non-string params compare as JSON (`true` is not

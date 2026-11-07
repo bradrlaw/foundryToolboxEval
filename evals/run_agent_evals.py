@@ -105,7 +105,8 @@ def score_turn(case: dict, result: dict) -> list[Failure]:
     criteria = case["pass_criteria"]
     failures: list[Failure] = []
     if result.get("platform_abort"):
-        # A tool error ended the whole request, so the user got no reply: response checks are skipped.
+        # A tool error or a failed tool call ended the whole request, so the user got no reply: response checks
+        # are skipped.
         failures.append(Failure("platform_abort", result["text"]))
 
     if criteria in ("tool_called_correctly", "both"):

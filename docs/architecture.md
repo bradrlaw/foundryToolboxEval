@@ -328,7 +328,8 @@ classDiagram
   agent runs, `agent` (`name`, the `version` that served the most turns, and its `model`). Versions are read from
   `FOUNDRY_PROJECT_ENDPOINT` after the run, never from another host, so the Foundry token goes nowhere new; a version
   that can't be read is null.
-- `abort_reason` is `tool_error`, `consent_required` or `tool_listing_failed` when `platform_abort` is true.
+- `abort_reason` is `tool_error`, `tool_call_failed`, `consent_required` or `tool_listing_failed` when `platform_abort`
+  is true.
 - `report.py` matches results to a baseline by `case_id`, or by conversation and turn, and lists what the run ran
   against that differs from the baseline's. An unknown version doesn't count as a change. A turn that ran several times
   counts once: it passed only if every run passed, its latency is the median over its runs, and a failure that recurs
@@ -466,7 +467,7 @@ sequenceDiagram
         T-->>R: abort_reason consent_required, the link to the console only
     end
     break a tool source fails to list its tools
-        TB-->>F: tool source error, for example HTTP_401
+        TB-->>F: tool source error, for example HTTP_401, or a server still starting from zero
         F-->>T: HTTP 400 McpProtocolException encountered while enumerating tools
         T-->>R: abort_reason tool_listing_failed
     end
@@ -476,6 +477,11 @@ sequenceDiagram
         M-->>F: tool call, for example sample___get_customer
         F->>TB: tools/call
         TB->>S: tools/call get_customer
+        break the toolbox can't reach S in time, for example while S starts from zero
+            TB-->>F: Remote MCP server error while calling tool
+            F-->>T: HTTP 400 McpProtocolException encountered while invoking tool
+            T-->>R: abort_reason tool_call_failed, tool name only, abort note as text
+        end
         S-->>TB: result, or a result with isError
         break the platform aborts on isError, as it did through October 2026
             TB-->>F: error result
@@ -504,6 +510,11 @@ When the agent can't run at all, because a tool source needs the user's consent 
 `abort_reason` to `consent_required` or `tool_listing_failed` and notes `[AGENT NOT RUN: ...]` instead of a reply. Such
 turns fail before any check runs, so a check like `must_not_call` can't pass on a turn that never happened.
 
+When the toolbox can't make the call the model chose, the service fails the whole call with HTTP 400
+`McpProtocolException encountered while invoking tool`. The target reports `platform_abort` with `abort_reason`
+`tool_call_failed`, the tool name parsed from the error and no arguments. This and a listing failure are what the first
+requests get while an MCP server that scaled to zero is starting ([§12](#12-platform-behaviors-the-design-handles)).
+
 ### Retries
 
 ```mermaid
@@ -513,7 +524,7 @@ flowchart TD
     r -->|"200"| ok(["return the response, this attempt's latency,<br/>n and the time since the first attempt began"])
     r -->|"HTTP 408, 429, 500, 502, 503 or 504"| hint["wait for retry-after-ms or Retry-After, up to 60 s,<br/>else 5, 10, 20, then 30 s"]
     r -->|"URLError or ConnectionError"| back["wait 5, 10, 20, then 30 s"]
-    r -->|"other HTTP status"| err(["raise ResponsesAPIError<br/>HTTP 400 tool error or tool-listing<br/>failure becomes platform_abort"])
+    r -->|"other HTTP status"| err(["raise ResponsesAPIError<br/>HTTP 400 tool error, failed tool call<br/>or tool-listing failure becomes platform_abort"])
     r -->|"read timeout"| tmo(["raise, not retried:<br/>tools may already be running"])
     hint --> more{"n less than 8?"}
     back --> more
@@ -537,8 +548,8 @@ tries the turn needed, and the console shows the elapsed time of turns that need
 | `max_latency_ms` | always, if set | Latency of the final HTTP attempt | `latency` |
 
 A turn the agent never ran (`abort_reason` `consent_required` or `tool_listing_failed`) fails with its note and the abort
-reason as its failure reason, and no other check runs. A turn the platform aborted on a tool error fails as
-`platform_abort`. Its tool calls, `must_not_call` and `max_tool_calls` are still checked, but the reply checks are skipped, because the user
+reason as its failure reason, and no other check runs. A turn the platform aborted on a tool error or a failed tool call
+fails as `platform_abort`. Its tool calls, `must_not_call` and `max_tool_calls` are still checked, but the reply checks are skipped, because the user
 got no reply. A turn whose request raised fails with `runner_error`.
 
 How `expected_tool_calls` are matched:
@@ -853,6 +864,7 @@ Deploy steps and current findings: [getting-started.md](getting-started.md) and 
 | A consent link binds whoever completes it to the user's connection | Printed to the console only; never in results, failure text, spans or ASSERT transcripts |
 | `UserEntraToken` can't get a token for a custom MCP server's audience | The Entra sample uses OAuth2 identity passthrough |
 | A denial returned as a tool error would reach the agent as text only, or abort the request as it did through October 2026 | The Entra sample returns denials as normal `access_denied` results |
+| An MCP server starting from zero takes about 20 s, and the toolbox fails agent requests meanwhile (HTTP 400 `McpProtocolException`, protocol version `2026-07-28`) | The sample servers keep one replica (`--min-replicas 1`); the target reports such turns as `platform_abort` with `abort_reason` `tool_listing_failed` or `tool_call_failed` |
 
 ## 13. Design decisions
 

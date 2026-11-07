@@ -111,9 +111,11 @@ def _tool_output_text(item: dict) -> str:
 
 
 PLATFORM_ABORT_NOTE = "[AGENT FAILURE: the platform aborted the request because a tool returned an error]"
+CALL_FAILED_NOTE = "[AGENT FAILURE: the platform aborted the request because the toolbox could not call a tool]"
 CONSENT_NOTE = "[AGENT NOT RUN: the signed-in user has not consented to the agent's OAuth tool connection]"
 LISTING_NOTE = "[AGENT NOT RUN: the toolbox could not list the agent's tools]"
 LISTING_FAILED = "McpProtocolException encountered while enumerating tools"
+CALL_FAILED = "McpProtocolException encountered while invoking tool"
 
 
 class AgentNotRun(RuntimeError):
@@ -180,6 +182,11 @@ def run_agent(messages: list[dict[str, str]]) -> dict:
       consent link goes to the console only.
     - tool_listing_failed: the toolbox could not list a tool source's tools (HTTP 400), e.g. the MCP
       server rejected the user's token.
+    - tool_call_failed: the toolbox could not call the tool the model chose, so the platform failed the whole
+      call with HTTP 400. The tool name is recovered from the error message.
+    Either of the last two happens while an MCP server that scaled to zero is still starting: the toolbox's
+    MCP client asks for protocol version 2026-07-28 and fails instead of falling back to the initialize
+    handshake when its server/discover probe times out (seen November 2026).
     """
     with _tracer.start_as_current_span("foundry_agent") as span:
         span.set_attribute("openinference.span.kind", "AGENT")
@@ -205,6 +212,11 @@ def run_agent(messages: list[dict[str, str]]) -> dict:
                     return _aborted(span, f"{CONSENT_NOTE} {failure.detail}", "consent_required", [], meta)
                 detail = failure.detail if failure else message
                 return _aborted(span, f"{LISTING_NOTE} {detail}", "tool_listing_failed", [], meta)
+            if e.status == 400 and CALL_FAILED in e.body:
+                message = _api_error_message(e.body)
+                m = re.search(r"invoking tool ([^\s:]+)", message)
+                calls = [{"name": m.group(1) if m else "", "arguments": None, "output": message}]
+                return _aborted(span, f"{CALL_FAILED_NOTE} {message}", "tool_call_failed", calls, meta)
             raise
 
         served = _served(data)

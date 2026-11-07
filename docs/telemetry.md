@@ -55,8 +55,8 @@ runner, so the target's spans carry `foundry-agent-evals`.
 `eval.outcome` lists the outcomes seen across a case's runs (`ok`, `tool_error`, `protocol_error`, `consent_required`,
 `upstream_error`, `invalid_result`, `transport_error`, `runner_error`), comma-separated. `eval.reasons` lists the distinct
 reason codes of a failed case or turn ([evals/reasons.py](../evals/reasons.py)), comma-separated, and is empty when it
-passed. `eval.abort_reason` is `tool_error`, `consent_required` or `tool_listing_failed` when `eval.platform_abort` is
-true ([entra.md](entra.md#failures-specific-to-identity)). `eval.repetition` is the run's number under `--repetitions`
+passed. `eval.abort_reason` is `tool_error`, `tool_call_failed`, `consent_required` or `tool_listing_failed` when
+`eval.platform_abort` is true ([entra.md](entra.md#failures-specific-to-identity)). `eval.repetition` is the run's number under `--repetitions`
 (1 without it). `eval.extra_calls` counts the turn's tool calls beyond those it expects, and is absent when the turn
 doesn't check its calls or none are known.
 

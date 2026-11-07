@@ -5,7 +5,7 @@ Real values for this deployment are kept in the git-ignored `deploy/resources.lo
 | Item | Value |
 | --- | --- |
 | Foundry resource / project | `<foundry-resource>` (rg `<foundry-rg>`) / `<project>` |
-| MCP host | Container App `sample-mcp` in `<sample-rg>` (`<region>`), ACR `<acr-name>` |
+| MCP host | Container App `sample-mcp` in `<sample-rg>` (`<region>`), ACR `<acr-name>`, `--min-replicas 1` |
 | Project connection | `sample-mcp-conn` (category `RemoteTool`, auth `None`) |
 | Toolbox | `sample-customer-toolbox` (v1, default) |
 | Consumer endpoint | `{project_endpoint}/toolboxes/sample-customer-toolbox/mcp?api-version=v1` |
@@ -45,6 +45,19 @@ The Entra stack ([docs/entra.md](../docs/entra.md)) runs beside it:
   runners still handle it: the agent runner fails the turn as `platform_abort`, and the ASSERT target returns an
   `[AGENT FAILURE ...]` reply for the judge to score.
 - Responses API calls can hit transient DNS errors; the target retries connection errors, 408, 429 and 5xx (honoring `Retry-After`).
+- **Don't let the MCP server scale to zero.** Tried in November 2026 and reverted. A Container App starting from zero
+  took about 20 s, and agent requests in that window failed with HTTP 400 `McpProtocolException encountered while
+  enumerating tools` (or `while invoking tool <name>`): "The server does not support the requested protocol version
+  '2026-07-28' ... The server appears to require the initialize handshake." That message comes from the MCP C# SDK: a
+  client pinned to protocol version 2026-07-28 whose `server/discover` probe gets no answer in time fails instead of
+  falling back to the initialize handshake. The toolbox gave up after about 10 s. In three cold runs, the first two agent
+  turns failed and later turns passed, on the open and the OAuth toolbox alike. The runners report such turns as
+  `platform_abort` with `abort_reason` `tool_listing_failed` or `tool_call_failed`. Direct calls waited instead: a cold
+  `tools/list` took about 19 s and succeeded, and those tool tests passed.
+- **A replica can get stuck starting.** On one cold start the OAuth server's new replica pulled its image but never
+  started its container, for over 15 minutes. Each OAuth `tools/call` spent about 150 s in the toolbox before failing,
+  so every call case in the tool tests timed out (`transport_error` after the runner's 60 s timeout); `tools/list` was
+  unaffected. A new revision replaced the replica.
 
 ## Entra findings
 

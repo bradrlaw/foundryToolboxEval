@@ -49,6 +49,9 @@ Checks: expected tool calls (+ param matching), `must_not_call`, response regex 
   inline `anyOf` of the record and the denial) and return `structuredContent` plus the same JSON as text. The tool runner
   fails a call whose JSON text and structured content disagree (`invalid_result`; the MCP SDK already checks the
   `outputSchema`), and list cases can require output schemas (`require_output_schemas`).
+- Hosting: the sample MCP servers keep one replica (`--min-replicas 1`). Scaling to zero was tried and reverted: the
+  toolbox fails agent requests while a server starts, which the target reports as `tool_listing_failed` or
+  `tool_call_failed`, and one cold start left a replica stuck ([findings](../deploy/README.md#findings)).
 
 ## Data format (JSONL, one case per line)
 

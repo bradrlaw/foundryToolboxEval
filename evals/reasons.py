@@ -41,7 +41,8 @@ TOOL_REASONS = {
 AGENT_REASONS = {
     "consent_required": "The agent never ran: the signed-in user hasn't consented to its OAuth tool connection.",
     "tool_listing_failed": "The agent never ran: the toolbox couldn't list its tools.",
-    "platform_abort": "A tool error ended the whole request (HTTP 400), so the user got no reply.",
+    "platform_abort": "A tool error, or a tool call the toolbox couldn't make, ended the whole request (HTTP 400), "
+                      "so the user got no reply.",
     "missing_call": "An expected tool call wasn't made.",
     "wrong_arguments": "The expected tool was called, but never with the expected arguments.",
     "wrong_order": "The expected calls were made, but not in the expected order.",
