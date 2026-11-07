@@ -97,6 +97,38 @@ class WhyFailedTests(unittest.TestCase):
         self.assertNotIn("Why cases failed", text)
 
 
+def ran(agent_version="2", model="gpt-4-1-mini", toolbox_version="3", commit="abc1234def", dirty=False, **kw):
+    return {"timestamp": "t", "results": [r("a", True)], **kw, "provenance": {
+        "repo": {"commit": commit, "dirty": dirty},
+        "agent": {"name": "assistant", "version": agent_version, "model": model},
+        "toolboxes": [{"name": "tb", "version": toolbox_version}]}}
+
+
+class ProvenanceReportTests(unittest.TestCase):
+    def test_says_what_the_run_ran_against_and_its_tokens(self):
+        usage = {"input_tokens": 12000, "output_tokens": 345, "total_tokens": 12345}
+        text = report.case_report("Agent evals", ran(toolbox_version=None, dirty=True, usage=usage), None)
+        self.assertIn("Ran against agent `assistant` v2, model `gpt-4-1-mini`, toolbox `tb` (version unknown), "
+                      "commit `abc1234` with uncommitted changes.", text)
+        self.assertIn("Tokens: 12,345 (12,000 input, 345 output)", text)
+
+    def test_baseline_section_lists_what_changed(self):
+        base = ran(agent_version="1", model="gpt-4o", toolbox_version=None, commit="0123456789")
+        base["provenance"]["toolboxes"].append({"name": "old", "version": "5"})
+        text = report.case_report("Agent evals", ran(), base)
+        # The baseline didn't know its toolbox version, so tb doesn't count as changed.
+        self.assertIn("- Changed since the baseline: agent `assistant` v1 -> v2; model `gpt-4o` -> `gpt-4-1-mini`; "
+                      "commit `0123456` -> `abc1234`; toolbox `old` v5 (only in the baseline)", text)
+        self.assertIn("- Changed since the baseline: none", report.case_report("T", ran(), ran()))
+
+    def test_runs_without_provenance_get_no_provenance_lines(self):
+        old = {"timestamp": "t0", "results": [r("a", True)]}
+        for cur, base in ((old, None), (ran(), old), (old, ran())):
+            text = report.case_report("T", cur, base)
+            self.assertNotIn("Changed since the baseline", text)
+        self.assertNotIn("Ran against", report.case_report("T", old, None))
+
+
 class AssertReportTests(unittest.TestCase):
     DESIGN = {"behavior": "Unsupported assertions", "data_availability": "tool_error", "pressure": "user_insists"}
 

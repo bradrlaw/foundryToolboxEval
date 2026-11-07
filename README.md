@@ -79,9 +79,10 @@ Cases can check the caller's identity with `{{caller.oid}}`, `{{caller.tid}}`, `
 Calls the agent `--agent`, else `FOUNDRY_AGENT_NAME` (default `customer-assistant`), through the Responses API and checks
 tool calls and arguments, `must_not_call`, response patterns and latency. Turns sharing a `conversation_id` run in order as
 one conversation.
-Each result records `tool_calls`, `response`, `latency_ms` (null when the call failed), `attempts` (HTTP tries, including
-retries), `platform_abort` with its `abort_reason`, and `history_gap`: an earlier turn got no answer (error or abort), so
-this turn's history lacks that reply. Abort reasons: `tool_error` (the platform ended the request because a tool returned
+Each result records `tool_calls`, `response`, `latency_ms` (the final HTTP try; null when the call failed), `elapsed_ms`
+(the whole request, including retries and their waits), `attempts` (HTTP tries, including retries), what served the turn
+(`response_id`, `agent_version`, `model` and token `usage`), `platform_abort` with its `abort_reason`, and `history_gap`:
+an earlier turn got no answer (error or abort), so this turn's history lacks that reply. Abort reasons: `tool_error` (the platform ended the request because a tool returned
 an error; the turn fails as `platform_abort`, and its tool calls are still checked), and `consent_required` or
 `tool_listing_failed` (the agent never ran, so the turn fails).
 Failure reasons: `missing_call`, `wrong_arguments`, `wrong_order`, `forbidden_call`, `response_mismatch`,
@@ -94,7 +95,10 @@ setup error (a missing endpoint or config, or no `az login`). The tool runner al
 fails, including a tool source that needs consent; the agent runner fails the affected turns instead. Each result keeps
 `failures` (messages) and a parallel `reasons` list
 with one code per message (all codes are described in `evals\reasons.py`), and the console ends with the number of failed
-cases per reason. Validate case files without running them:
+cases per reason. Each run file also records its `provenance`: the commit (and whether the working tree had changes), the
+toolbox's default version and, for agent runs, the agent version and model; agent runs add the run's total token `usage`.
+Versions are read from `FOUNDRY_PROJECT_ENDPOINT` only and are null when they can't be read. Validate case files without
+running them:
 
 ```powershell
 .\.venv\Scripts\python scripts\validate_eval_jsonl.py "data\tool-tests\*.jsonl" "data\agent-evals\*.jsonl"
@@ -125,9 +129,10 @@ request through October 2026, now reach the model as text (see `deploy/README.md
 .\.venv\Scripts\python scripts\report.py assert results\assert\results\<suite>\<run> [--baseline <other run dir>] [--out report.md]
 ```
 
-Tool and agent reports show pass rates by category, latency, platform aborts, a *Why cases failed* table (failed cases
-per reason) and each failure grouped by reason; regressions against a baseline list their reasons. Runs recorded before
-reasons existed show `unrecorded`. The ASSERT report adds each violation with the judge's justification per dimension, and
+Tool and agent reports show what the run ran against (agent, model, toolbox versions and commit), the agent run's tokens,
+pass rates by category, latency, platform aborts, a *Why cases failed* table (failed cases per reason) and each failure
+grouped by reason; regressions against a baseline list their reasons, and the report lists what changed since the
+baseline (for example ``agent `customer-assistant` v2 -> v3``). Runs recorded before reasons existed show `unrecorded`. The ASSERT report adds each violation with the judge's justification per dimension, and
 the error for each case it couldn't score (for example the Responses API's error code and message).
 
 ## Unit tests and CI

@@ -138,7 +138,7 @@ class ConversationTests(unittest.TestCase):
         out = self.run_turns(agent)
         self.assertEqual(out[0]["failures"], ["runner error: RuntimeError: boom"])
         self.assertEqual(out[0]["reasons"], ["runner_error"])
-        self.assertIsNone(out[0]["latency_ms"])
+        self.assertEqual((out[0]["latency_ms"], out[0]["elapsed_ms"], out[0]["agent_version"]), (None, None, None))
         self.assertEqual(seen[1], ["user", "user"])
         self.assertTrue(out[1]["passed"])
         self.assertEqual(out[1]["reasons"], [])
@@ -159,8 +159,46 @@ class ConversationTests(unittest.TestCase):
         self.assertEqual(seen[2], ["m1", "m2", "ok", "m3"])
         self.assertEqual([r["history_gap"] for r in out], [False, True, True])
 
+    def test_each_turn_records_what_served_it_and_its_elapsed_time(self):
+        served = {"response_id": "resp_1", "agent_version": "2", "model": "gpt-4-1-mini",
+                  "usage": {"input_tokens": 10, "output_tokens": 2, "total_tokens": 12}}
+        out = self.run_turns(lambda history: {**res([], text="ok"), "attempts": 2, "elapsed_ms": 9100.04, **served}, n=1)
+        self.assertEqual({k: out[0][k] for k in served}, served)
+        self.assertEqual((out[0]["attempts"], out[0]["elapsed_ms"]), (2, 9100.0))
+
 
 class MainTests(unittest.TestCase):
+    LINE = {"conversation_id": "x", "turn_number": 1, "user_message": "Who am I?", "expected_tool_calls": [],
+            "pass_criteria": "response_matches", "expected_response_pattern": "{{caller.name}}", "category": "c"}
+
+    def main(self, turns, *argv, agent=None):
+        """Run main on LINE with the conversations faked to return `turns`, and `agent` as what the project says
+        about the agent version. Returns the exit code, the saved run, what the fake run got, and the lookup."""
+        seen = {}
+
+        def fake_run(cases, run_agent):
+            seen.update(cases=cases, agent=target.AGENT_NAME)
+            return turns
+
+        agent = agent or {"name": "n", "version": None, "model": None, "toolboxes": []}
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(target, "AGENT_NAME", "default-agent"), \
+                mock.patch("evals.run_agent_evals.load_dotenv"), mock.patch("evals.telemetry.init"), \
+                mock.patch("evals.auth.get_token", return_value="tok"), \
+                mock.patch("evals.auth.caller_claims", return_value={"name": "Ada (Admin)"}), \
+                mock.patch("evals.run_agent_evals.run_conversations", side_effect=fake_run), \
+                mock.patch("evals.provenance.repo", return_value={"commit": "abc", "dirty": False}), \
+                mock.patch("evals.provenance.agent", return_value=agent) as lookup, \
+                contextlib.redirect_stdout(io.StringIO()):
+            path = Path(tmp) / "cases.jsonl"
+            path.write_text(json.dumps(self.LINE), encoding="utf-8")
+            code = main([str(path), "--out", tmp, *argv])
+            saved = json.loads(next(Path(tmp).glob("run-*.json")).read_text(encoding="utf-8"))
+        return code, saved, seen, lookup
+
+    @staticmethod
+    def turn(n, **kw):
+        return {"conversation_id": "x", "turn_number": n, "category": "c", "passed": True, "failures": [],
+                "platform_abort": False, "abort_reason": None, "history_gap": False, "latency_ms": 1.0, **kw}
     def test_invalid_cases_exit_2_before_contacting_the_agent(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "bad.jsonl"
@@ -171,27 +209,26 @@ class MainTests(unittest.TestCase):
         self.assertIn("'turn_number' is a required property", err.getvalue())
 
     def test_agent_flag_and_caller_placeholders(self):
-        seen = {}
-
-        def fake_run(cases, agent):
-            seen.update(cases=cases, agent=target.AGENT_NAME)
-            return [{"conversation_id": "x", "turn_number": 1, "category": "c", "passed": True, "failures": [],
-                     "platform_abort": False, "abort_reason": None, "history_gap": False, "latency_ms": 1.0}]
-
-        line = {"conversation_id": "x", "turn_number": 1, "user_message": "Who am I?", "expected_tool_calls": [],
-                "pass_criteria": "response_matches", "expected_response_pattern": "{{caller.name}}", "category": "c"}
-        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(target, "AGENT_NAME", "default-agent"), \
-                mock.patch("evals.run_agent_evals.load_dotenv"), mock.patch("evals.telemetry.init"), \
-                mock.patch("evals.auth.get_token", return_value="tok"), \
-                mock.patch("evals.auth.caller_claims", return_value={"name": "Ada (Admin)"}), \
-                mock.patch("evals.run_agent_evals.run_conversations", side_effect=fake_run), \
-                contextlib.redirect_stdout(io.StringIO()):
-            path = Path(tmp) / "cases.jsonl"
-            path.write_text(json.dumps(line), encoding="utf-8")
-            self.assertEqual(main([str(path), "--agent", "my-agent", "--out", tmp]), 0)
-            saved = json.loads(next(Path(tmp).glob("run-*.json")).read_text(encoding="utf-8"))
+        code, saved, seen, _ = self.main([self.turn(1)], "--agent", "my-agent")
+        self.assertEqual(code, 0)
         self.assertEqual((seen["agent"], saved["agent"]), ("my-agent", "my-agent"))
         self.assertEqual(seen["cases"][0]["expected_response_pattern"], "Ada\\ \\(Admin\\)")
+
+    def test_the_run_records_what_it_ran_against_and_its_tokens(self):
+        turns = [self.turn(1, agent_version="2", model="gpt-4-1-mini",
+                           usage={"input_tokens": 10, "output_tokens": 1, "total_tokens": 11}),
+                 self.turn(2, agent_version="2", model="gpt-4-1-mini",
+                           usage={"input_tokens": 20, "output_tokens": 2, "total_tokens": 22}),
+                 self.turn(3, agent_version="1", model="gpt-4o", usage=None),
+                 self.turn(4, agent_version=None, model=None, usage=None)]
+        # The definition couldn't be read, so the model comes from the turns.
+        agent = {"name": "my-agent", "version": "2", "model": None, "toolboxes": [{"name": "tb", "version": "3"}]}
+        _, saved, _, lookup = self.main(turns, "--agent", "my-agent", agent=agent)
+        lookup.assert_called_once_with(target.PROJECT_ENDPOINT, "my-agent", "2")  # the version most turns used
+        self.assertEqual(saved["provenance"], {"repo": {"commit": "abc", "dirty": False},
+                                               "agent": {"name": "my-agent", "version": "2", "model": "gpt-4-1-mini"},
+                                               "toolboxes": [{"name": "tb", "version": "3"}]})
+        self.assertEqual(saved["usage"], {"input_tokens": 30, "output_tokens": 3, "total_tokens": 33})
 
 
 if __name__ == "__main__":

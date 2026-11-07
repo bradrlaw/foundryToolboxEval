@@ -43,9 +43,10 @@ MAX_RETRY_AFTER_S = 60.0
 class ResponsesAPIError(RuntimeError):
     """Non-retryable (or retries exhausted) HTTP error from the Responses API."""
 
-    def __init__(self, status: int, body: str, latency_ms: float, attempts: int = 1):
+    def __init__(self, status: int, body: str, latency_ms: float, attempts: int = 1, elapsed_ms: float | None = None):
         super().__init__(f"Responses API {status}: {body[:500]}")
         self.status, self.body, self.latency_ms, self.attempts = status, body, latency_ms, attempts
+        self.elapsed_ms = latency_ms if elapsed_ms is None else elapsed_ms
 
 
 def retry_delay(attempt: int, headers=None) -> float:
@@ -67,13 +68,15 @@ def retry_delay(attempt: int, headers=None) -> float:
     return min(30.0, 5.0 * 2 ** attempt)
 
 
-def _post_responses(payload: dict) -> tuple[dict, float, int]:
-    """POST to the Responses API. Returns (response JSON, latency of the final attempt in ms, attempts).
+def _post_responses(payload: dict) -> tuple[dict, float, int, float]:
+    """POST to the Responses API. Returns (response JSON, latency of the final attempt in ms, attempts,
+    elapsed ms). Elapsed covers the whole call: token fetches, every attempt and the waits between them.
 
     Throttling and transient HTTP errors are retried, as are connection failures. A read timeout is not:
     the agent may already be running tools, and the latency would be meaningless anyway.
     """
     body = json.dumps(payload).encode()
+    began = time.perf_counter()
     for attempt in range(MAX_ATTEMPTS):
         headers = {"Authorization": "Bearer " + auth.get_token(), "Content-Type": "application/json"}
         telemetry.inject(headers)
@@ -82,13 +85,14 @@ def _post_responses(payload: dict) -> tuple[dict, float, int]:
         try:
             with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT_S) as resp:
                 data = json.loads(resp.read())
-            return data, (time.perf_counter() - start) * 1000, attempt + 1
+            end = time.perf_counter()
+            return data, (end - start) * 1000, attempt + 1, (end - began) * 1000
         except urllib.error.HTTPError as e:
-            latency = (time.perf_counter() - start) * 1000
+            end = time.perf_counter()
             with e:  # closes the error response
                 text = e.read().decode(errors="replace")
             if e.code not in RETRY_STATUSES or attempt == MAX_ATTEMPTS - 1:
-                raise ResponsesAPIError(e.code, text, latency, attempt + 1) from e
+                raise ResponsesAPIError(e.code, text, (end - start) * 1000, attempt + 1, (end - began) * 1000) from e
             delay = retry_delay(attempt, e.headers)
         except (urllib.error.URLError, ConnectionError):
             if attempt == MAX_ATTEMPTS - 1:
@@ -131,18 +135,40 @@ def _username() -> str | None:
         return None
 
 
-def _aborted(span, text: str, reason: str, calls: list, latency_ms: float, attempts: int) -> dict:
+TOKENS = ("input_tokens", "output_tokens", "total_tokens")
+NOT_SERVED = {"response_id": None, "agent_version": None, "model": None, "usage": None}
+
+
+def _served(data: dict) -> dict:
+    """The response's id, the agent version and model that produced it, and its token usage."""
+    ref = data.get("agent_reference") if isinstance(data.get("agent_reference"), dict) else {}
+    usage = data.get("usage") if isinstance(data.get("usage"), dict) else None
+    version = ref.get("version")
+    return {"response_id": data.get("id"), "agent_version": None if version is None else str(version),
+            "model": data.get("model"), "usage": {k: usage.get(k) for k in TOKENS} if usage else None}
+
+
+def _record_served(span, served: dict) -> None:
+    """The OpenTelemetry GenAI attributes of an agent invocation: the agent version and the tokens it used."""
+    if served["agent_version"] is not None:
+        span.set_attribute("gen_ai.agent.version", served["agent_version"])
+    for k in ("input_tokens", "output_tokens"):
+        if isinstance((served["usage"] or {}).get(k), int):
+            span.set_attribute(f"gen_ai.usage.{k}", served["usage"][k])
+
+
+def _aborted(span, text: str, reason: str, calls: list, meta: dict) -> dict:
     span.set_attribute("eval.platform_abort", True)
     span.set_attribute("eval.abort_reason", reason)
     span.set_attribute("output.value", text)
-    return {"text": text, "platform_abort": True, "abort_reason": reason, "tool_calls": calls,
-            "latency_ms": latency_ms, "attempts": attempts}
+    return {"text": text, "platform_abort": True, "abort_reason": reason, "tool_calls": calls, **meta}
 
 
 def run_agent(messages: list[dict[str, str]]) -> dict:
-    """Call the agent once. Returns text, tool_calls [{name, arguments, output}], latency_ms, attempts,
-    platform_abort and abort_reason. latency_ms covers the final HTTP attempt only (no token fetch or
-    retry waits).
+    """Call the agent once. Returns text, tool_calls [{name, arguments, output}], platform_abort, abort_reason,
+    latency_ms, attempts, elapsed_ms, and the response_id, agent_version, model and usage (input, output and
+    total tokens) of the response, which are null when the call failed with an HTTP error. latency_ms covers the
+    final HTTP attempt only; elapsed_ms also covers token fetches, earlier attempts and retry waits.
 
     Findings, reported as platform_abort=True with an abort_reason:
     - tool_error: the platform failed the whole Responses call with HTTP 400 because a toolbox tool returned
@@ -161,26 +187,29 @@ def run_agent(messages: list[dict[str, str]]) -> dict:
         span.set_attribute("gen_ai.agent.name", AGENT_NAME)
         span.set_attribute("input.value", messages[-1]["content"])
         try:
-            data, latency_ms, attempts = _post_responses({
+            data, latency_ms, attempts, elapsed_ms = _post_responses({
                 "input": messages,
                 "agent_reference": {"type": "agent_reference", "name": AGENT_NAME},
             })
         except ResponsesAPIError as e:
+            meta = {"latency_ms": e.latency_ms, "attempts": e.attempts, "elapsed_ms": e.elapsed_ms, **NOT_SERVED}
             if e.status == 400 and "An error occurred invoking" in e.body:
                 m = re.search(r"invoking '([^']+)'", e.body)
                 calls = [{"name": m.group(1) if m else "", "arguments": None, "output": str(e)}]
-                return _aborted(span, f"{PLATFORM_ABORT_NOTE} {e}", "tool_error", calls, e.latency_ms, e.attempts)
+                return _aborted(span, f"{PLATFORM_ABORT_NOTE} {e}", "tool_error", calls, meta)
             if e.status == 400 and LISTING_FAILED in e.body:
                 message = _api_error_message(e.body)
                 failure = toolbox_errors.classify(message)
                 if failure and failure.consent:
                     toolbox_errors.announce_consent(failure.consent, _username())
-                    return _aborted(span, f"{CONSENT_NOTE} {failure.detail}", "consent_required", [],
-                                    e.latency_ms, e.attempts)
+                    return _aborted(span, f"{CONSENT_NOTE} {failure.detail}", "consent_required", [], meta)
                 detail = failure.detail if failure else message
-                return _aborted(span, f"{LISTING_NOTE} {detail}", "tool_listing_failed", [], e.latency_ms, e.attempts)
+                return _aborted(span, f"{LISTING_NOTE} {detail}", "tool_listing_failed", [], meta)
             raise
 
+        served = _served(data)
+        _record_served(span, served)
+        meta = {"latency_ms": latency_ms, "attempts": attempts, "elapsed_ms": elapsed_ms, **served}
         text, calls, consent = "", [], []
         for item in data.get("output", []):
             if item.get("type") == "mcp_call":
@@ -201,12 +230,11 @@ def run_agent(messages: list[dict[str, str]]) -> dict:
         if consent:
             toolbox_errors.announce_consent(consent, _username())
             detail = "; ".join(f"tool source '{s}': {toolbox_errors.CONSENT_DETAIL}" for s, _ in consent)
-            return _aborted(span, f"{CONSENT_NOTE} {detail}", "consent_required", calls, latency_ms, attempts)
+            return _aborted(span, f"{CONSENT_NOTE} {detail}", "consent_required", calls, meta)
         if data.get("status") != "completed":
             raise RuntimeError(f"Agent response status {data.get('status')}: {data.get('error')}")
         span.set_attribute("output.value", text)
-        return {"text": text, "platform_abort": False, "abort_reason": None, "tool_calls": calls,
-                "latency_ms": latency_ms, "attempts": attempts}
+        return {"text": text, "platform_abort": False, "abort_reason": None, "tool_calls": calls, **meta}
 
 
 def chat(message: str, history: list[dict[str, str]] | None = None) -> str:

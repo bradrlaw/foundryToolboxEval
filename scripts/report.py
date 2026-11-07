@@ -1,8 +1,9 @@
 """Markdown reports for tool-test, agent-eval, and ASSERT runs, with optional baseline comparison.
 
 Tool and agent reports say why cases failed: failures grouped by the reason code the runners record with each
-failure (evals/reasons.py). ASSERT reports list each violation with the judge's justification, and the cases
-that weren't scored with the target's error.
+failure (evals/reasons.py). They also say what the run ran against (agent version and model, toolbox versions,
+commit) and, against a baseline, what of that changed. ASSERT reports list each violation with the judge's
+justification, and the cases that weren't scored with the target's error.
 
 Usage:
   python scripts/report.py tool   [RUN.json] [--baseline RUN.json]
@@ -115,15 +116,60 @@ def why_failed(results: list[dict], meanings: dict[str, str]) -> list[str]:
     return lines
 
 
+def _version(item: dict) -> str | None:
+    return None if item.get("version") is None else f"v{item['version']}"
+
+
+def ran_against(run: dict) -> dict[str, str | None]:
+    """What a run ran against, from its provenance: {component: version}, None where the version is unknown.
+    Empty for runs recorded before provenance existed."""
+    p = run.get("provenance") or {}
+    out: dict[str, str | None] = {}
+    agent = p.get("agent") or {}
+    if agent.get("name"):
+        out[f"agent `{agent['name']}`"] = _version(agent)
+        if agent.get("model"):
+            out["model"] = f"`{agent['model']}`"
+    for tb in p.get("toolboxes") or []:
+        out[f"toolbox `{tb['name']}`"] = _version(tb)
+    repo = p.get("repo") or {}
+    if repo.get("commit"):
+        out["commit"] = f"`{repo['commit'][:7]}`" + (" with uncommitted changes" if repo.get("dirty") else "")
+    return out
+
+
+def _known(value: str | None) -> str:
+    return value or "(version unknown)"
+
+
+def provenance_changes(current: dict, baseline: dict) -> list[str]:
+    """What the run ran against that differs from the baseline. An unknown version is not counted as a change."""
+    cur, base = ran_against(current), ran_against(baseline)
+    out = []
+    for k in [*cur, *(k for k in base if k not in cur)]:
+        if k not in base:
+            out.append(f"{k} {_known(cur[k])} (not in the baseline)")
+        elif k not in cur:
+            out.append(f"{k} {_known(base[k])} (only in the baseline)")
+        elif cur[k] and base[k] and cur[k] != base[k]:
+            out.append(f"{k} {base[k]} -> {cur[k]}")
+    return out
+
+
 def case_report(title: str, current: dict, baseline: dict | None, meanings: dict[str, str] | None = None) -> str:
     res = current["results"]
     passed = sum(r["passed"] for r in res)
     lines = [f"# {title}", "", f"Run `{current.get('timestamp', '?')}`: **{passed}/{len(res)} passed**", ""]
+    if ran := ran_against(current):
+        lines += ["Ran against " + ", ".join(f"{k} {_known(v)}" for k, v in ran.items()) + ".", ""]
     lines += ["| Category | Passed | Total |", "| --- | ---: | ---: |"]
     lines += [f"| {c} | {p} | {t} |" for c, (p, t) in by_category(res).items()]
     lats = sorted(x for x in (_latency(r) for r in res) if x)
     if lats:
         lines += ["", f"Latency (per-case p50): median {lats[len(lats) // 2]:.0f} ms, max {lats[-1]:.0f} ms"]
+    if usage := current.get("usage"):
+        lines += ["", f"Tokens: {usage.get('total_tokens') or 0:,} ({usage.get('input_tokens') or 0:,} input, "
+                      f"{usage.get('output_tokens') or 0:,} output)"]
     aborts = [r for r in res if r.get("platform_abort")]
     gaps = sum(bool(r.get("history_gap")) for r in res)
     if aborts or gaps:
@@ -137,6 +183,8 @@ def case_report(title: str, current: dict, baseline: dict | None, meanings: dict
         regressions = [f"`{c}` ({', '.join(dict.fromkeys(k for k, _ in failure_reasons(cur[c])))})"
                        for c in d["regressions"]]
         lines += ["", f"## Vs. baseline `{baseline.get('timestamp', '?')}`", ""]
+        if ran_against(current) and ran_against(baseline):
+            lines.append(f"- Changed since the baseline: {'; '.join(provenance_changes(current, baseline)) or 'none'}")
         lines.append(f"- Regressions: {', '.join(regressions) or 'none'}")
         lines.append(f"- Fixed: {', '.join(f'`{c}`' for c in d['fixes']) or 'none'}")
         lines.append(f"- New cases: {len(d['new'])}; removed: {len(d['removed'])}")

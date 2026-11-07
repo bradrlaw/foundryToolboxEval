@@ -5,7 +5,8 @@ Complements ASSERT, which judges behavior but does not check exact tool calls or
 Usage:
   python -m evals.run_agent_evals data/agent-evals/sample-toolbox.jsonl
   python -m evals.run_agent_evals data/agent-evals/sample-toolbox-entra.jsonl --agent customer-assistant-oauth
-Results are written to results/agent-evals/run-<UTC timestamp>.json.
+Results are written to results/agent-evals/run-<UTC timestamp>.json, with what the run ran against (commit,
+agent version and model, toolbox versions; evals/provenance.py) and its token totals.
 
 Cases may use {{caller.oid}}, {{caller.tid}}, {{caller.name}} and {{caller.username}}, filled from the
 signed-in user's token. A turn the agent could not run at all (consent_required, tool_listing_failed)
@@ -19,18 +20,22 @@ from __future__ import annotations
 import argparse
 import re
 import sys
+from collections import Counter
 from pathlib import Path
 
 from azure.core.exceptions import ClientAuthenticationError
 from dotenv import load_dotenv
 
-from evals import auth, telemetry
+from evals import auth, provenance, telemetry
 from evals.cases import ROOT, CaseError, fill_caller, json_equal, load_cases
 from evals.reasons import Failure, summary_line
 from evals.results import write_run
 from evals.toolbox_errors import AGENT_NOT_RUN
 
 MAX_MESSAGE = 300
+# What served each turn, recorded with its result: null when the request failed.
+SERVED = ("response_id", "agent_version", "model", "usage")
+TOKENS = ("input_tokens", "output_tokens", "total_tokens")
 
 
 def _value_matches(expected, actual) -> bool:
@@ -161,8 +166,10 @@ def run_conversations(cases: list[dict], agent) -> list[dict]:
                 "passed": not found, "failures": failures, "reasons": reasons,
                 "platform_abort": bool(res and res["platform_abort"]),
                 "abort_reason": res.get("abort_reason") if res else None, "history_gap": gap,
-                "latency_ms": round(res["latency_ms"], 1) if res else None,
+                "latency_ms": _round(res["latency_ms"]) if res else None,
+                "elapsed_ms": _round(res.get("elapsed_ms")) if res else None,
                 "attempts": res.get("attempts") if res else None,
+                **{k: res.get(k) if res else None for k in SERVED},
                 "tool_calls": [{"name": c["name"], "arguments": c["arguments"]} for c in res["tool_calls"]] if res else [],
                 "response": res["text"][:500] if res else "",
             })
@@ -173,8 +180,38 @@ def run_conversations(cases: list[dict], agent) -> list[dict]:
     return results
 
 
+def _round(ms: float | None) -> float | None:
+    return None if ms is None else round(ms, 1)
+
+
 def _fmt_ms(ms: float | None) -> str:
     return "-" if ms is None else f"{ms:.0f}ms"
+
+
+def _timing(r: dict) -> str:
+    if (r.get("attempts") or 0) < 2:
+        return _fmt_ms(r["latency_ms"])
+    return f"{_fmt_ms(r['latency_ms'])} ({r['attempts']} attempts, {_fmt_ms(r.get('elapsed_ms'))} in all)"
+
+
+def _most_common(values) -> str | None:
+    found = Counter(v for v in values if v)
+    return found.most_common(1)[0][0] if found else None
+
+
+def run_provenance(results: list[dict], project: str, agent_name: str) -> dict:
+    """What the run ran against: the repo, and the agent version that served the most turns, with its model and
+    toolboxes. Each turn records the version and model that served it."""
+    found = provenance.agent(project, agent_name, _most_common(r.get("agent_version") for r in results))
+    model = found["model"] or _most_common(r.get("model") for r in results)
+    return {"repo": provenance.repo(), "agent": {"name": agent_name, "version": found["version"], "model": model},
+            "toolboxes": found["toolboxes"]}
+
+
+def total_usage(results: list[dict]) -> dict | None:
+    """Tokens summed over the turns that report usage."""
+    used = [r["usage"] for r in results if r.get("usage")]
+    return {k: sum(u.get(k) or 0 for u in used) for k in TOKENS} if used else None
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -219,7 +256,7 @@ def main(argv: list[str] | None = None) -> int:
         if r["history_gap"]:
             flags += " [history gap]"
         print(f"{'PASS' if r['passed'] else 'FAIL'} {r['conversation_id']}#{r['turn_number']} {r['category']}{flags} "
-              f"{_fmt_ms(r['latency_ms'])}")
+              f"{_timing(r)}")
         for f in r["failures"]:
             print(f"       - {f}")
     passed = sum(r["passed"] for r in results)
@@ -230,7 +267,9 @@ def main(argv: list[str] | None = None) -> int:
         print("Some turns did not run: the agent's OAuth tool connection needs the signed-in user's consent. "
               "Open the link printed above, approve, then rerun.", file=sys.stderr)
 
-    out = write_run(args.out, lambda stamp: {"agent": target.AGENT_NAME, "timestamp": stamp, "results": results})
+    ran = run_provenance(results, target.PROJECT_ENDPOINT, target.AGENT_NAME)
+    out = write_run(args.out, lambda stamp: {"agent": target.AGENT_NAME, "timestamp": stamp, "provenance": ran,
+                                             "usage": total_usage(results), "results": results})
     print(f"results: {out}")
     return 0 if passed == len(results) else 1
 

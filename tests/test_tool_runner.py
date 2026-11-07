@@ -305,7 +305,20 @@ class MainTests(NoTokenTestCase):
                     mock.patch.object(run.toolbox_errors, "_announced", set()), \
                     contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
                 code = run.main([str(path), "--endpoint", TARGET.endpoint, "--out", tmp])
+            self.saved = [json.loads(p.read_text(encoding="utf-8")) for p in Path(tmp).glob("run-*.json")]
         return code, out.getvalue(), err.getvalue()
+
+    def test_the_run_records_what_it_ran_against(self):
+        async def run_all(cases, target):
+            return [], {}
+
+        toolbox = {"name": "tb", "version": "3"}
+        with mock.patch.dict(os.environ, {"FOUNDRY_PROJECT_ENDPOINT": "https://project.example"}), \
+                mock.patch.object(run.provenance, "repo", return_value={"commit": "abc", "dirty": True}), \
+                mock.patch.object(run.provenance, "toolbox", return_value=toolbox) as lookup:
+            self.main([case()], run_all)
+        lookup.assert_called_once_with(TARGET.endpoint, "https://project.example")
+        self.assertEqual(self.saved[0]["provenance"], {"repo": {"commit": "abc", "dirty": True}, "toolboxes": [toolbox]})
 
     def test_consent_needed_at_connect_exits_2_and_prints_the_link_after_the_error(self):
         async def run_all(cases, target):

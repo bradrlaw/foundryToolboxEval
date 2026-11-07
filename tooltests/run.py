@@ -6,7 +6,8 @@ Usage:
 
 The endpoint is --endpoint, else toolbox.mcp_endpoint from --config, else
 $FOUNDRY_PROJECT_ENDPOINT/toolboxes/<--toolbox, $FOUNDRY_TOOLBOX_NAME or sample-customer-toolbox>/mcp.
-Results are written to results/tool-tests/run-<UTC timestamp>.json.
+Results are written to results/tool-tests/run-<UTC timestamp>.json, with the commit and toolbox version the
+run ran against (evals/provenance.py).
 
 Each request ends in one outcome: ok, tool_error (a result with isError), protocol_error (a JSON-RPC
 error such as an unknown tool), consent_required (the signed-in user has not yet consented to a tool
@@ -51,7 +52,7 @@ from mcp.shared.exceptions import MCPError
 from mcp.types import CONNECTION_CLOSED, REQUEST_TIMEOUT, Implementation
 from pydantic import ValidationError
 
-from evals import __version__, auth, telemetry, toolbox_errors
+from evals import __version__, auth, provenance, telemetry, toolbox_errors
 from evals.cases import ROOT, CaseError, fill_caller, format_error, json_equal, load_cases, schema_validator
 from evals.reasons import Failure, summary_line
 from evals.results import write_run
@@ -592,8 +593,10 @@ def main(argv: list[str] | None = None) -> int:
     if why := summary_line(results):
         print(why)
 
+    tb = provenance.toolbox(target.endpoint, os.environ.get("FOUNDRY_PROJECT_ENDPOINT"))
+    ran = {"repo": provenance.repo(), "toolboxes": [tb] if tb else []}
     out = write_run(args.out, lambda stamp: {"endpoint": target.endpoint, "timestamp": stamp, **info,
-                                             "results": results})
+                                             "provenance": ran, "results": results})
     print(f"results: {out}")
     return 0 if passed == len(results) else 1
 

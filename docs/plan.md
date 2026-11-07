@@ -30,13 +30,18 @@ Checks: expected tool calls (+ param matching), `must_not_call`, response regex 
   assert specific call parameters, so the two complement each other.
 - Reports (`scripts/report.py`: baseline diffs, failures grouped by reason, ASSERT violations with the judge's
   justifications) and App Insights telemetry (`docs/telemetry.md`): done. Every failure carries a reason code
-  (`evals/reasons.py`) in the result files and spans.
+  (`evals/reasons.py`) in the result files and spans. Traces run from the eval turn to the toolbox's requests, for open
+  and OAuth identity-passthrough toolboxes alike.
 - CI: done. `.github/workflows/ci.yml` runs the offline checks (install, compile, case validation, unit tests) on Ubuntu
   with Python 3.11 and 3.14 and on Windows with 3.14; no Azure access.
 - Per-user Entra identity: done ([entra.md](entra.md)). An Entra-protected sample server (`AUTH_MODE=entra`, region
   filtering by app role) behind an OAuth2 identity-passthrough connection; `{{caller.*}}` placeholders; the tool-test
   outcomes `consent_required` and `upstream_error`; and agent abort reasons for turns the agent never ran. `UserEntraToken`
   doesn't work for custom MCP servers: Foundry's token exchange rejects custom audiences.
+- Provenance: done. Tool and agent run files record the commit, each toolbox's default version and, for agent runs, the
+  agent version and model; agent turns record their response id, agent version, model, token usage and `elapsed_ms` (the
+  whole request, retries included). Reports show these and what changed since the baseline, and agent spans carry the
+  agent version and tokens. ASSERT runs don't record provenance yet.
 
 ## Data format (JSONL, one case per line)
 
@@ -66,8 +71,8 @@ Checks: expected tool calls (+ param matching), `must_not_call`, response regex 
 
 - Read MCP `structuredContent` and validate it against each tool's `outputSchema`; return typed results from the sample tools.
 - Agent scoring: penalize extra calls, pass@k over repetitions.
-- Multi-turn fidelity (`previous_response_id` or Foundry conversations instead of text replay) and per-run provenance
-  (agent version, model, toolbox version, token usage).
+- Multi-turn fidelity (`previous_response_id` or Foundry conversations instead of text replay); provenance for ASSERT
+  runs.
 - Live runs in CI (an OIDC federated credential and a test project); Foundry cloud evaluation as a server-side
   alternative.
 - Identity: several test identities in one run (a role matrix, each case tagged with the identity it expects); hosted

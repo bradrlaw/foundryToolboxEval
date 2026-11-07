@@ -45,7 +45,7 @@ Run the runners with the venv python (it has `azure-monitor-opentelemetry-export
 | --- | --- |
 | `foundry-toolbox-tests` | `toolbox.test_case` (`eval.case_id`, `eval.kind`, `eval.category`, `gen_ai.tool.name`, `eval.passed`, `eval.outcome`, `eval.latency_p50_ms`, `eval.failures`, `eval.reasons`), with the MCP SDK's `MCP send <method>` spans as children and the toolbox's requests under those |
 | `foundry-agent-evals` | `eval.turn` (`eval.conversation_id`, `eval.turn_number`, `eval.category`, `eval.passed`, `eval.failures`, `eval.reasons`), with the target's `foundry_agent` and `tool:*` spans as children |
-| `foundry-agent-target` | `foundry_agent` (`gen_ai.agent.name`, `eval.platform_abort`, `eval.abort_reason`) and `tool:*` (`gen_ai.tool.name`), when ASSERT runs the target or it runs on its own |
+| `foundry-agent-target` | `foundry_agent` (`gen_ai.agent.name`, `gen_ai.agent.version`, `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens`, `eval.platform_abort`, `eval.abort_reason`) and `tool:*` (`gen_ai.tool.name`), when ASSERT runs the target or it runs on its own. The version and tokens are those the agent's response reports, absent when the request failed |
 | `responsesapi` (Foundry) | `invoke_agent`, `chat <model>`, `execute_tool` with real tool durations |
 | `agentsv2` (Foundry toolbox) | Requests, in `requests`: `tools/call <tool>` and `tools/list <toolbox>:<version>` (`gen_ai.tool.name`, `gen_ai.tool.call.arguments`, `microsoft.foundry.toolbox.name`, `microsoft.foundry.toolbox.version`, `error.type`, `rpc.response.status_code`). `resultCode` is `0`, or `500` when the call fails (`error.type` `tool_error` or `json_rpc_error`) |
 
@@ -67,6 +67,12 @@ The target injects a W3C `traceparent` into the Responses call, so server spans 
 and you can see one trace from eval turn to model and tool calls, including the toolbox's requests. Tool spans created by
 the target are zero-duration markers; use the server-side spans for tool latency: `execute_tool` is the agent's view (it
 includes Foundry's overhead), the toolbox's `tools/call` request the tool's.
+
+The trace holds when the toolbox uses OAuth identity passthrough too: in the Entra sample's agent evals, every turn's
+trace reached `invoke_agent`, `execute_tool` and the toolbox's `tools/call` requests. Foundry records one `chat <model>`
+span per turn even when the agent calls tools, matching the one model request per turn that Azure Monitor counts for the
+deployment. The toolbox's `tools/list` request appears in only some traces (once per run in our runs), because the
+service reuses a toolbox's tool list across requests.
 
 The tool runner sends the same header on every request to the toolbox, which ignores the copy of the trace context that
 the MCP SDK puts in `params._meta`. Each toolbox request is a child of the runner's `MCP send` span, in the case's trace.
@@ -109,6 +115,12 @@ dependencies | where cloud_RoleName == "foundry-toolbox-tests" and name startswi
 // agent requests that aborted or never ran, by reason
 dependencies | where name == "foundry_agent" and tostring(customDimensions["eval.platform_abort"]) =~ "true"
 | summarize n=count() by reason=tostring(customDimensions["eval.abort_reason"]), bin(timestamp, 1d)
+
+// agent tokens by agent version and day
+dependencies | where name == "foundry_agent" and isnotempty(customDimensions["gen_ai.usage.input_tokens"])
+| summarize turns=count(), input=sum(toint(customDimensions["gen_ai.usage.input_tokens"])),
+    output=sum(toint(customDimensions["gen_ai.usage.output_tokens"]))
+    by agent=tostring(customDimensions["gen_ai.agent.name"]), version=tostring(customDimensions["gen_ai.agent.version"]), bin(timestamp, 1d)
 
 // full trace for one eval turn or tool-test case
 union dependencies, requests | where operation_Id == "<id>" | project timestamp, cloud_RoleName, name, duration | order by timestamp asc

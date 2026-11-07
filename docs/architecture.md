@@ -87,6 +87,7 @@ flowchart TB
         terr["toolbox_errors.py<br/>consent and tool-source failures"]
         reasons["reasons.py<br/>failure reason codes"]
         runfiles["results.py<br/>run files"]
+        prov["provenance.py<br/>commit, agent and toolbox versions"]
     end
     mcpsdk["mcp SDK client"]
     assertai["assert-ai"]
@@ -112,6 +113,8 @@ flowchart TB
     rep --> results
     run & rae & rep --> reasons
     run & rae --> runfiles
+    run & rae --> prov
+    prov --> common
     runfiles --> results
     dep --> az
 ```
@@ -126,9 +129,10 @@ flowchart TB
 | `evals/toolbox_errors.py` | Recognizes toolbox errors caused by a tool source (consent needed, or the source failed) and prints consent links to the console, the only place they appear |
 | `evals/reasons.py` | Failure reason codes and what each means, shared by both runners and `report.py` |
 | `evals/results.py` | Writes each run of either runner to a new `run-<UTC timestamp>.json`; a run finishing in the same second as another waits for the next second, so no run overwrites another and names sort in run order |
+| `evals/provenance.py` | Records what a run ran against: the commit and whether the working tree had changes, each toolbox's default version, and for agent runs the agent version and its model. Versions come only from `FOUNDRY_PROJECT_ENDPOINT`; what can't be read is null, and a failed lookup never fails a run |
 | `evals/telemetry.py` | `span()` helper and the optional App Insights exporter; does nothing without a connection string |
 | `scripts/run_assert.py` | Runs `assert-ai run` from the repo root with artifacts under `results/assert` |
-| `scripts/report.py` | Markdown reports and baseline diffs for all three result types: pass rates, failures grouped by reason, ASSERT violations with the judge's justifications and the errors of cases it couldn't score |
+| `scripts/report.py` | Markdown reports and baseline diffs for all three result types: pass rates, failures grouped by reason, what tool and agent runs ran against and what of that changed, ASSERT violations with the judge's justifications and the errors of cases it couldn't score |
 | `scripts/validate_eval_jsonl.py` | Validates case files without running them |
 | `scripts/deploy_toolbox.py`, `deploy_agent.py`, `_az.py` | Create the connection (no auth, OAuth2 or UserEntraToken), toolbox version and agent version through `az rest`; for OAuth2, also the client secret and redirect URI on the client app |
 | `scripts/setup_entra.py` | Registers the Entra apps for the Entra sample through Microsoft Graph: the API app (scope, app roles, your role assignments) and the OAuth client app |
@@ -246,6 +250,7 @@ classDiagram
         +string protocol_version
         +object server
         +list~string~ tools
+        +Provenance provenance
         +list~ToolResult~ results
     }
     class ToolResult {
@@ -265,7 +270,14 @@ classDiagram
     class AgentRun {
         +string agent
         +string timestamp
+        +Provenance provenance
+        +object usage
         +list~AgentResult~ results
+    }
+    class Provenance {
+        +object repo
+        +object agent
+        +list~object~ toolboxes
     }
     class AgentResult {
         +string conversation_id
@@ -278,20 +290,38 @@ classDiagram
         +string abort_reason
         +bool history_gap
         +float latency_ms
+        +float elapsed_ms
         +int attempts
+        +string response_id
+        +string agent_version
+        +string model
+        +object usage
         +list~object~ tool_calls
         +string response
     }
     ToolRun "1" *-- "1..*" ToolResult : results
     AgentRun "1" *-- "1..*" AgentResult : results
+    ToolRun "1" *-- "1" Provenance : provenance
+    AgentRun "1" *-- "1" Provenance : provenance
 ```
 
 - `outcomes` counts outcomes across repetitions.
 - `reasons` runs parallel to `failures`: `reasons[i]` is the code for `failures[i]`, described in `evals/reasons.py`.
   Reports group failures by it, and spans carry the distinct codes as `eval.reasons`.
-- `latency_ms` and `attempts` are null when a turn raised.
+- `latency_ms` is the final HTTP attempt. `elapsed_ms` is the whole request: token fetches, every attempt and the
+  waits between them. Both, and `attempts`, are null when a turn raised.
+- `response_id`, `agent_version`, `model` and `usage` (input, output and total tokens) come from the agent's response,
+  and are null when the request failed with an HTTP error. The run's `usage` sums its turns. `usage` is what the service
+  meters for the whole turn, tool-calling steps included: a run's totals matched the model deployment's `InputTokens` and
+  `OutputTokens` metrics in Azure Monitor exactly.
+- `provenance` says what the run ran against: `repo` (`commit`, and `dirty` when the working tree had uncommitted or
+  untracked changes), `toolboxes` (`name` and `version`, the default version that the consumer endpoint serves) and, for
+  agent runs, `agent` (`name`, the `version` that served the most turns, and its `model`). Versions are read from
+  `FOUNDRY_PROJECT_ENDPOINT` after the run, never from another host, so the Foundry token goes nowhere new; a version
+  that can't be read is null.
 - `abort_reason` is `tool_error`, `consent_required` or `tool_listing_failed` when `platform_abort` is true.
-- `report.py` matches results to a baseline by `case_id`, or by conversation and turn.
+- `report.py` matches results to a baseline by `case_id`, or by conversation and turn, and lists what the run ran
+  against that differs from the baseline's. An unknown version doesn't count as a change.
 
 ## 5. Tool tests
 
@@ -329,6 +359,7 @@ sequenceDiagram
             TB-->>R: HTTP status, compared with expect_status
         end
     end
+    R->>R: read the commit and the default version of the toolbox (provenance)
     R->>R: write results/tool-tests/run-stamp.json
     R-->>U: PASS or FAIL per case, exit code 0, 1 or 2
 ```
@@ -440,7 +471,7 @@ sequenceDiagram
     M-->>F: final answer
     F-->>T: 200, status completed, mcp_call and message output items
     T->>T: strip structuredResponse, emit a span per tool call
-    T-->>R: text, tool_calls, latency_ms, attempts
+    T-->>R: text, tool_calls, latency_ms, elapsed_ms, attempts, agent_version, model, usage
 ```
 
 Tool errors reach the model as text. The `mcp_call` item of a failed call reports `status: completed` and `error: null`,
@@ -462,7 +493,7 @@ turns fail before any check runs, so a check like `must_not_call` can't pass on 
 flowchart TD
     a["attempt n of 8"] --> tok["auth.get_token, cached"] --> post["POST /openai/v1/responses<br/>180 s timeout"]
     post --> r{"result"}
-    r -->|"200"| ok(["return the response,<br/>this attempt's latency and n"])
+    r -->|"200"| ok(["return the response, this attempt's latency,<br/>n and the time since the first attempt began"])
     r -->|"HTTP 408, 429, 500, 502, 503 or 504"| hint["wait for retry-after-ms or Retry-After, up to 60 s,<br/>else 5, 10, 20, then 30 s"]
     r -->|"URLError or ConnectionError"| back["wait 5, 10, 20, then 30 s"]
     r -->|"other HTTP status"| err(["raise ResponsesAPIError<br/>HTTP 400 tool error or tool-listing<br/>failure becomes platform_abort"])
@@ -473,8 +504,9 @@ flowchart TD
     more -->|"no"| last(["raise the last error"])
 ```
 
-`latency_ms` covers the final attempt only, so token fetches and retry waits are excluded. `attempts` records how many
-tries the turn needed.
+`latency_ms` covers the final attempt only, so token fetches and retry waits are excluded; `max_latency_ms` checks it.
+`elapsed_ms` covers the whole call: token fetches, every attempt and the waits between them. `attempts` records how many
+tries the turn needed, and the console shows the elapsed time of turns that needed more than one.
 
 ### Scoring a turn
 
@@ -692,7 +724,8 @@ turn's `operation_Id`, so one trace runs from the eval turn through the model an
 `tools/call` requests for the tool's. The tool runner sends `traceparent` too, as an HTTP header, because the toolbox
 ignores the MCP SDK's `params._meta` copy; so a tool-test case's trace also reaches the toolbox's requests
 ([telemetry.md](telemetry.md#3-what-is-emitted)). The `foundry_agent` span carries
-`eval.platform_abort` and `eval.abort_reason`; consent links never reach a span.
+`eval.platform_abort` and `eval.abort_reason`, and the agent version and tokens the response reports
+(`gen_ai.agent.version`, `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens`); consent links never reach a span.
 
 ## 10. Reliability
 

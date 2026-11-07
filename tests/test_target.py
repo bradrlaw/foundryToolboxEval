@@ -7,6 +7,10 @@ import unittest
 import urllib.error
 from unittest import mock
 
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+
 # Import without the real .env or App Insights: the target reads its settings at import time.
 with mock.patch.dict(os.environ, {"FOUNDRY_PROJECT_ENDPOINT": "https://example.test/api/projects/p/"}), \
         mock.patch("dotenv.load_dotenv"), mock.patch("evals.telemetry.init"):
@@ -28,14 +32,34 @@ def ok(data):
 
 class PostResponsesTests(unittest.TestCase):
     def setUp(self):
+        self.now = 0.0
         patches = [
             mock.patch.object(target.auth, "get_token", return_value="tok"),
-            mock.patch.object(target.time, "sleep"),
+            mock.patch.object(target, "time"),
             mock.patch.object(target.urllib.request, "urlopen"),
         ]
-        _, self.sleep, self.urlopen = [p.start() for p in patches]
+        _, clock, self.urlopen = [p.start() for p in patches]
         for p in patches:
             self.addCleanup(p.stop)
+        # A fake clock: it moves only while a request runs (see respond) or the client waits.
+        clock.perf_counter.side_effect = lambda: self.now
+        clock.sleep.side_effect = self.wait
+        self.sleep = clock.sleep
+
+    def wait(self, seconds):
+        self.now += seconds
+
+    def respond(self, *steps):
+        """Answer each request with the next (seconds it takes, response or error to raise)."""
+        steps = list(steps)
+
+        def urlopen(*args, **kwargs):
+            seconds, outcome = steps.pop(0)
+            self.now += seconds
+            if isinstance(outcome, BaseException):
+                raise outcome
+            return outcome
+        self.urlopen.side_effect = urlopen
 
     def test_endpoint_trailing_slash_is_trimmed(self):
         self.urlopen.side_effect = [ok({})]
@@ -45,10 +69,21 @@ class PostResponsesTests(unittest.TestCase):
 
     def test_throttling_honors_retry_after(self):
         self.urlopen.side_effect = [http_error(429, "slow down", Retry_After="7"), ok({"status": "completed"})]
-        data, latency, attempts = target._post_responses({})
+        data, _, attempts, _ = target._post_responses({})
         self.assertEqual((data, attempts), ({"status": "completed"}, 2))
         self.sleep.assert_called_once_with(7.0)
-        self.assertGreaterEqual(latency, 0)
+
+    def test_elapsed_time_covers_every_attempt_and_wait_and_latency_only_the_last(self):
+        self.respond((1.0, http_error(429, Retry_After="7")), (0.5, ok({})))
+        _, latency, attempts, elapsed = target._post_responses({})
+        self.assertEqual((latency, attempts, elapsed), (500.0, 2, 8500.0))
+
+        self.now = 0.0
+        self.respond((0.25, http_error(503)), (1.0, http_error(400, "bad input")))  # 5 s backoff after the 503
+        with self.assertRaises(target.ResponsesAPIError) as ctx:
+            target._post_responses({})
+        self.assertEqual((ctx.exception.latency_ms, ctx.exception.attempts, ctx.exception.elapsed_ms),
+                         (1000.0, 2, 6250.0))
 
     def test_client_errors_are_not_retried(self):
         self.urlopen.side_effect = [http_error(400, "bad input")]
@@ -86,12 +121,14 @@ class RetryDelayTests(unittest.TestCase):
 
 class RunAgentTests(unittest.TestCase):
     def test_tool_error_abort_becomes_a_result(self):
-        err = target.ResponsesAPIError(400, "An error occurred invoking 'get_customer': not found", 12.0, 2)
+        err = target.ResponsesAPIError(400, "An error occurred invoking 'get_customer': not found", 12.0, 2, 5012.0)
         with mock.patch.object(target, "_post_responses", side_effect=err):
             out = target.run_agent([{"role": "user", "content": "hi"}])
             self.assertTrue(target.chat("hi").startswith(target.PLATFORM_ABORT_NOTE))  # the judge sees it
         self.assertEqual((out["platform_abort"], out["abort_reason"]), (True, "tool_error"))
-        self.assertEqual((out["tool_calls"][0]["name"], out["latency_ms"], out["attempts"]), ("get_customer", 12.0, 2))
+        self.assertEqual((out["tool_calls"][0]["name"], out["latency_ms"], out["attempts"], out["elapsed_ms"]),
+                         ("get_customer", 12.0, 2, 5012.0))
+        self.assertEqual({k: out[k] for k in target.NOT_SERVED}, target.NOT_SERVED)
         self.assertTrue(out["text"].startswith(target.PLATFORM_ABORT_NOTE))
 
     def test_consent_request_aborts_and_the_link_only_reaches_the_console(self):
@@ -100,7 +137,7 @@ class RunAgentTests(unittest.TestCase):
             {"type": "oauth_consent_request", "id": "oauthreq_1", "consent_link": LINK, "server_label": "sample"},
         ]}
         err = io.StringIO()
-        with mock.patch.object(target, "_post_responses", return_value=(data, 30.0, 1)), \
+        with mock.patch.object(target, "_post_responses", return_value=(data, 30.0, 1, 30.0)), \
                 mock.patch.object(target.toolbox_errors, "_announced", set()), \
                 mock.patch.object(target, "_username", return_value="ada@example.com"), \
                 contextlib.redirect_stderr(err):
@@ -139,17 +176,43 @@ class RunAgentTests(unittest.TestCase):
             target.run_agent([{"role": "user", "content": "hi"}])
 
     def test_parses_tool_calls_and_message(self):
-        data = {"status": "completed", "output": [
-            {"type": "mcp_call", "name": "get_stock_quote", "arguments": '{"ticker": "CTSO"}',
-             "output": '{"price": 84.12}\n{\n  "structuredResponse": {}\n}'},
-            {"type": "message", "content": [{"text": "Contoso trades at 84.12."}]},
-        ]}
-        with mock.patch.object(target, "_post_responses", return_value=(data, 50.0, 1)):
+        data = {
+            "id": "resp_1", "status": "completed", "model": "gpt-4-1-mini",
+            "agent_reference": {"type": "agent_reference", "name": "customer-assistant", "version": 2},
+            "usage": {"input_tokens": 900, "input_tokens_details": {"cached_tokens": 0}, "output_tokens": 40,
+                      "total_tokens": 940},
+            "output": [
+                {"type": "mcp_call", "name": "get_stock_quote", "arguments": '{"ticker": "CTSO"}',
+                 "output": '{"price": 84.12}\n{\n  "structuredResponse": {}\n}'},
+                {"type": "message", "content": [{"text": "Contoso trades at 84.12."}]},
+            ],
+        }
+        with mock.patch.object(target, "_post_responses", return_value=(data, 50.0, 2, 5050.0)):
             out = target.run_agent([{"role": "user", "content": "price?"}])
         self.assertEqual(out["tool_calls"], [{"name": "get_stock_quote", "arguments": {"ticker": "CTSO"},
                                               "output": '{"price": 84.12}'}])
         self.assertEqual((out["text"], out["latency_ms"], out["platform_abort"], out["abort_reason"]),
                          ("Contoso trades at 84.12.", 50.0, False, None))
+        self.assertEqual((out["attempts"], out["elapsed_ms"]), (2, 5050.0))
+        self.assertEqual((out["response_id"], out["agent_version"], out["model"], out["usage"]),
+                         ("resp_1", "2", "gpt-4-1-mini", {"input_tokens": 900, "output_tokens": 40, "total_tokens": 940}))
+
+    def test_the_agent_span_records_the_agent_version_and_tokens_it_reported(self):
+        full = {"status": "completed", "output": [], "agent_reference": {"name": "customer-assistant", "version": 2},
+                "usage": {"input_tokens": 900, "output_tokens": 40, "total_tokens": 940}}
+        for data, expected in (
+            (full, {"gen_ai.agent.version": "2", "gen_ai.usage.input_tokens": 900, "gen_ai.usage.output_tokens": 40}),
+            ({"status": "completed", "output": []}, {}),
+        ):
+            exporter = InMemorySpanExporter()
+            provider = TracerProvider()
+            provider.add_span_processor(SimpleSpanProcessor(exporter))
+            with mock.patch.object(target, "_tracer", provider.get_tracer("test")), \
+                    mock.patch.object(target, "_post_responses", return_value=(data, 50.0, 1, 50.0)):
+                target.run_agent([{"role": "user", "content": "hi"}])
+            (span,) = exporter.get_finished_spans()
+            self.assertEqual({k: v for k, v in span.attributes.items()
+                              if k.startswith(("gen_ai.agent.version", "gen_ai.usage."))}, expected)
 
 
 if __name__ == "__main__":
