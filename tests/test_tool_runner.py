@@ -5,6 +5,7 @@ import io
 import json
 import logging
 import os
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -208,7 +209,7 @@ class RunAllTests(NoTokenTestCase):
         self.addCleanup(patcher.stop)
         self.connects = 0
 
-    def run_all(self, cases, run_case, connect_failures=(), connect_error=None, toolbox=None):
+    def run_all(self, cases, run_case, connect_failures=(), connect_error=None, toolbox=None, **progress):
         @contextlib.asynccontextmanager
         async def fake_connect(target, http_errors):
             self.connects += 1
@@ -219,9 +220,36 @@ class RunAllTests(NoTokenTestCase):
                 raise ExceptionGroup("tg", [MCPError(INTERNAL_ERROR, "Server returned an error response")])
             yield toolbox(http_errors) if toolbox else FakeToolbox()
 
+        self.stderr = io.StringIO()
         with mock.patch.object(run, "connect", fake_connect), mock.patch.object(run, "run_case", run_case), \
-                contextlib.redirect_stderr(io.StringIO()):
-            return asyncio.run(run.run_all(cases, TARGET))
+                contextlib.redirect_stderr(self.stderr):
+            return asyncio.run(run.run_all(cases, TARGET, **progress))
+
+    def test_progress_is_reported_as_each_case_finishes(self):
+        events = []
+
+        async def run_case(tb, c):
+            events.append(("run", c["case_id"]))
+            if c["case_id"] == "b":
+                raise ExceptionGroup("tg", [httpx2.ConnectError("boom")])
+            return {"case_id": c["case_id"], "passed": True}
+
+        self.run_all([case("a"), case("b"), case("c")], run_case,
+                     on_connect=lambda info: events.append(("toolbox", info["protocol_version"])),
+                     on_result=lambda r: events.append(("result", r["case_id"])))
+        self.assertEqual(events, [("toolbox", "2025-11-25"), ("run", "a"), ("result", "a"), ("run", "b"),
+                                  ("result", "b"), ("run", "c"), ("result", "c")])
+
+    def test_a_progress_error_is_a_warning_not_a_lost_session(self):
+        async def run_case(tb, c):
+            return {"case_id": c["case_id"], "passed": True}
+
+        def on_result(r):
+            raise UnicodeEncodeError("charmap", "\u2192", 0, 1, "character maps to <undefined>")
+
+        results, _ = self.run_all([case("a"), case("b")], run_case, on_result=on_result)
+        self.assertEqual(([r["case_id"] for r in results], self.connects), (["a", "b"], 1))
+        self.assertEqual(self.stderr.getvalue().count("warning: cannot show progress: UnicodeEncodeError"), 2)
 
     def test_lost_session_fails_the_in_flight_case_and_reconnects(self):
         seen = []
@@ -325,7 +353,7 @@ class MainTests(NoTokenTestCase):
         return code, out.getvalue(), err.getvalue()
 
     def test_the_run_records_what_it_ran_against(self):
-        async def run_all(cases, target):
+        async def run_all(cases, target, **progress):
             return [], {}
 
         toolbox = {"name": "tb", "version": "3"}
@@ -337,7 +365,7 @@ class MainTests(NoTokenTestCase):
         self.assertEqual(self.saved[0]["provenance"], {"repo": {"commit": "abc", "dirty": True}, "toolboxes": [toolbox]})
 
     def test_consent_needed_at_connect_exits_2_and_prints_the_link_after_the_error(self):
-        async def run_all(cases, target):
+        async def run_all(cases, target, **progress):
             raise run.SetupError("cannot connect: tool source 'sample': user consent required", [("sample", LINK)])
 
         code, _, err = self.main([case()], run_all)
@@ -347,7 +375,7 @@ class MainTests(NoTokenTestCase):
     def test_caller_placeholders_are_filled_before_the_run(self):
         seen = []
 
-        async def run_all(cases, target):
+        async def run_all(cases, target, **progress):
             seen.extend(cases)
             return [], {}
 
@@ -358,6 +386,21 @@ class MainTests(NoTokenTestCase):
         code, _, err = self.main([case(arguments={"id": "{{caller.oid}}"})], run_all)
         self.assertEqual(code, 2)
         self.assertIn("{{caller.oid}}: no matching claim", err)
+
+    def test_each_result_is_printed_once_as_it_finishes(self):
+        shown = []
+        result = run.error_result(case(), "transport_error", "MCP error -32001: Request 'tools/call' timed out")
+
+        async def run_all(cases, target, on_connect, on_result):
+            on_connect({"protocol_version": "2025-11-25", "server": {"name": "srv", "version": "1"}, "tools": ["t"]})
+            on_result(result)
+            shown.append(sys.stdout.getvalue())
+            return [result], {}
+
+        code, out, _ = self.main([case()], run_all)
+        self.assertEqual(code, 1)
+        self.assertRegex(shown[0], r"^srv 1, protocol 2025-11-25, 1 tools\n\nFAIL c1 +t +p50=.*\n +- .*timed out\n$")
+        self.assertEqual(out.count("FAIL c1"), 1)
 
 
 class TraceContextTests(NoTokenTestCase):

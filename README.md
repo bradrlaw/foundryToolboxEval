@@ -57,7 +57,8 @@ to one tenant. Use the venv's python for every command below.
 ```
 
 The endpoint is `<FOUNDRY_PROJECT_ENDPOINT>/toolboxes/<FOUNDRY_TOOLBOX_NAME>/mcp` unless `--endpoint`, `--config` or
-`--toolbox` is given. Case arguments accept globs (`"data\tool-tests\*.jsonl"`).
+`--toolbox` is given. Case arguments accept globs (`"data\tool-tests\*.jsonl"`). Each case's result prints as soon as it
+finishes; a request that gets no answer fails after `--timeout` seconds (default 60).
 Case kinds: `call` (default), `list` (tools/list checks: `expect_tools`, `require_schemas`, `require_output_schemas`),
 `auth` (bad/missing token -> expected status).
 Each call ends in one outcome (`ok`, `tool_error`, `protocol_error`, `consent_required`, `upstream_error`, `invalid_result`,

@@ -503,23 +503,48 @@ async def run_case(tb: Toolbox, case: dict) -> dict:
         return result
 
 
-async def run_all(cases: list[dict], target: Target) -> tuple[list[dict], dict]:
-    """Run cases in order on one MCP session, reconnecting if the session dies mid-run."""
+Report = Callable[[dict], None]
+
+
+def _report(callback: Report | None, value: dict) -> None:
+    if callback is None:
+        return
+    try:
+        callback(value)
+    except Exception as e:  # a progress line that can't be shown must not end the run or look like a lost session
+        print(f"warning: cannot show progress: {type(e).__name__}: {e}", file=sys.stderr)
+
+
+async def run_all(cases: list[dict], target: Target, on_connect: Report | None = None,
+                  on_result: Report | None = None) -> tuple[list[dict], dict]:
+    """Run cases in order on one MCP session, reconnecting if the session dies mid-run.
+
+    For progress, `on_connect` gets the toolbox's description after the first connect and `on_result` each
+    result as it finishes."""
     results: list[dict] = []
     info: dict = {}
     pending = list(cases)
     reconnects = 0
     ever_connected = False
+
+    def record(*done: dict) -> None:
+        for result in done:
+            results.append(result)
+            _report(on_result, result)
+
     while pending:
         http_errors = HttpErrors()
         connected = False
         try:
             async with connect(target, http_errors) as tb:
                 connected = ever_connected = True
-                info = info or tb.describe()
+                if not info:
+                    info = tb.describe()
+                    _report(on_connect, info)
                 while pending:
-                    results.append(await run_case(tb, pending[0]))
+                    result = await run_case(tb, pending[0])
                     pending.pop(0)
+                    record(result)
         except Exception as e:  # transport failures arrive as (nested) ExceptionGroups
             reason = explain(e, http_errors)
             if not ever_connected:
@@ -529,11 +554,11 @@ async def run_all(cases: list[dict], target: Target) -> tuple[list[dict], dict]:
                 print(f"warning: error closing the MCP session: {reason}", file=sys.stderr)
                 break
             if connected:
-                results.append(error_result(pending.pop(0), "transport_error", f"session lost: {reason}"))
+                record(error_result(pending.pop(0), "transport_error", f"session lost: {reason}"))
             reconnects += 1
             if reconnects > MAX_RECONNECTS:
-                results += [error_result(c, "transport_error", f"not run: session lost ({reason})", "not_run")
-                            for c in pending]
+                record(*[error_result(c, "transport_error", f"not run: session lost ({reason})", "not_run")
+                         for c in pending])
                 break
             print(f"session lost ({reason}); reconnecting ({reconnects}/{MAX_RECONNECTS})", file=sys.stderr)
             await asyncio.sleep(RECONNECT_BACKOFF_S * 2 ** (reconnects - 1))
@@ -564,6 +589,18 @@ def resolve_target(args: argparse.Namespace) -> Target:
 
 def _fmt_ms(value: float | None) -> str:
     return f"{value:>8}ms" if value is not None else f"{'-':>8}  "
+
+
+def _print_toolbox(info: dict) -> None:
+    if server := info.get("server"):
+        print(f"{server['name']} {server['version']}, protocol {info['protocol_version']}, "
+              f"{len(info['tools'])} tools\n", flush=True)
+
+
+def _print_result(r: dict) -> None:
+    head = (f"{'PASS' if r['passed'] else 'FAIL'} {r['case_id']:<18} {r['tool']:<32} "
+            f"p50={_fmt_ms(r['latency_p50_ms'])} p95={_fmt_ms(r['latency_p95_ms'])}")
+    print("\n".join([head] + [f"       - {f}" for f in r["failures"]]), flush=True)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -597,19 +634,12 @@ def main(argv: list[str] | None = None) -> int:
 
     telemetry.init("foundry-toolbox-tests")
     try:
-        results, info = asyncio.run(run_all(cases, target))
+        results, info = asyncio.run(run_all(cases, target, on_connect=_print_toolbox, on_result=_print_result))
     except SetupError as e:
         print(f"error: {e}", file=sys.stderr)
         toolbox_errors.announce_consent(e.consent, _username(target.scope))
         return 2
 
-    if server := info.get("server"):
-        print(f"{server['name']} {server['version']}, protocol {info['protocol_version']}, {len(info['tools'])} tools\n")
-    for r in results:
-        print(f"{'PASS' if r['passed'] else 'FAIL'} {r['case_id']:<18} {r['tool']:<32} "
-              f"p50={_fmt_ms(r['latency_p50_ms'])} p95={_fmt_ms(r['latency_p95_ms'])}")
-        for f in r["failures"]:
-            print(f"       - {f}")
     passed = sum(r["passed"] for r in results)
     print(f"\n{passed}/{len(results)} passed")
     if why := summary_line(results):

@@ -443,7 +443,8 @@ stateDiagram-v2
 
 The HTTP client has no read timeout. A read timeout inside an MCP POST tears down the whole session, so the MCP-level
 request timeout (`--timeout`, default 60 s) bounds each request instead and reports `transport_error`. Connection
-attempts are retried by the HTTP transport (3 retries).
+attempts are retried by the HTTP transport (3 retries). Each case's result prints as soon as it finishes, so a run that
+waits out timeouts still shows progress.
 
 ## 6. Agent evals
 
