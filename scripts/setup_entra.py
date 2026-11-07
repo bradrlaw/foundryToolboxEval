@@ -151,11 +151,22 @@ def scope_id(api_app: dict) -> str:
     return next(s["id"] for s in api_app["api"]["oauth2PermissionScopes"] if s["value"] == SCOPE)
 
 
+def pre_authorize(existing: list[dict], client_ids: list[str], permission_id: str) -> list[dict]:
+    """preAuthorizedApplications with each client also granted `permission_id`; other entries and permissions stay."""
+    entries = [{**p, "delegatedPermissionIds": list(p.get("delegatedPermissionIds", []))} for p in existing]
+    for client in client_ids:
+        entry = next((p for p in entries if p["appId"] == client), None)
+        if entry is None:
+            entries.append({"appId": client, "delegatedPermissionIds": [permission_id]})
+        elif permission_id not in entry["delegatedPermissionIds"]:
+            entry["delegatedPermissionIds"].append(permission_id)
+    return entries
+
+
 def trust_clients(api_app: dict, api_sp: dict, client_ids: list[str]) -> None:
     """Pre-authorize the clients for the API scope and grant tenant-wide consent, so no user is prompted."""
     api = api_app["api"]
-    pre = [p for p in api.get("preAuthorizedApplications", []) if p["appId"] not in client_ids]
-    pre += [{"appId": c, "delegatedPermissionIds": [scope_id(api_app)]} for c in client_ids]
+    pre = pre_authorize(api.get("preAuthorizedApplications", []), client_ids, scope_id(api_app))
     graph("PATCH", f"/applications/{api_app['id']}", {"api": {**api, "preAuthorizedApplications": pre}})
     for client in client_ids:
         ensure_grant(service_principal(client)["id"], api_sp["id"], [SCOPE])

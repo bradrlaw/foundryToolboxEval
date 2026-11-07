@@ -391,8 +391,12 @@ class ResolveTargetTests(unittest.TestCase):
         with mock.patch.object(Path, "read_text", return_value='{"toolbox": {"mcp_endpoint": "https://c/mcp", "token_scope": "s"}}'):
             target = self.resolve(config=Path("x.json"))
         self.assertEqual((target.endpoint, target.scope), ("https://c/mcp", "s"))
-        with mock.patch.object(Path, "read_text", return_value='{"agent": {}}'), self.assertRaises(run.SetupError):
-            self.resolve(config=Path("x.json"))
+        with mock.patch.object(Path, "read_text", return_value='{"toolbox": {"mcp_endpoint": "https://c/mcp", "token_scope": null}}'):
+            self.assertEqual(self.resolve(config=Path("x.json")).scope, run.auth.FOUNDRY_SCOPE)
+        for text in ('{"agent": {}}', '[1]', '"x"', '{"toolbox": "x"}', '{"toolbox": null}', '{"toolbox": {"mcp_endpoint": 5}}'):
+            with self.subTest(config=text), mock.patch.object(Path, "read_text", return_value=text), \
+                    self.assertRaises(run.SetupError):
+                self.resolve(config=Path("x.json"))
 
     def test_missing_endpoint(self):
         with self.assertRaises(run.SetupError):

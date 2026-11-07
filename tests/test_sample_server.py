@@ -41,6 +41,8 @@ class SampleServerTests(unittest.TestCase):
         # The tool-test cases in data/tool-tests/sample-toolbox.jsonl assert on these messages.
         for tool, args, expected in [
             ("get_customer", {"customer_id": "BAD"}, "not found"),
+            ("get_customer", {"name": "o"}, "matches more than one customer"),
+            ("get_customer", {"name": " "}, "Provide customer_id or name"),
             ("get_stock_quote", {"customer_id": "C1005"}, "privately held"),
             ("get_market_conditions", {"industry": "aerospace"}, "Unsupported industry"),
             ("get_market_conditions", {}, "industry"),

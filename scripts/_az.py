@@ -9,9 +9,11 @@ import tempfile
 import time
 from urllib.parse import quote
 
-# Worth retrying: local DNS or connection drops, throttling and gateway errors.
-TRANSIENT = ("NameResolutionError", "ConnectionError", "Connection aborted", "Too Many Requests",
-             "Bad Gateway", "Service Unavailable", "Gateway Timeout")
+# Worth retrying for any method: the request never reached the service, or the service throttled it unprocessed.
+NOT_SENT = ("NameResolutionError", "NewConnectionError", "ConnectTimeoutError", "Too Many Requests")
+# Worth retrying except for POST: the service may have applied a request whose response was lost, and a POST
+# (for example addPassword) would then be applied twice.
+TRANSIENT = ("ConnectionError", "Connection aborted", "Bad Gateway", "Service Unavailable", "Gateway Timeout")
 ATTEMPTS = 6
 GRAPH = "https://graph.microsoft.com/v1.0"
 # Graph is eventually consistent: a new app, service principal or role can be invisible for a few seconds.
@@ -32,8 +34,9 @@ def az(*args: str) -> tuple[int, str, str]:
 
 def rest(method: str, url: str, body: dict | None = None, resource: str | None = None,
          retry: tuple[str, ...] = ()) -> dict:
-    """`az rest` with retries on transient errors, plus any error text in `retry`. Exits with the CLI's
-    error lines if the call fails."""
+    """`az rest` with retries on transient errors (for POST, only those that show the request wasn't applied),
+    plus any error text in `retry`. Exits with the CLI's error lines if the call fails."""
+    retryable = NOT_SENT + retry + (() if method.upper() == "POST" else TRANSIENT)
     cmd = ["rest", "--method", method, "--url", url]
     if resource:
         cmd += ["--resource", resource]
@@ -47,7 +50,7 @@ def rest(method: str, url: str, body: dict | None = None, resource: str | None =
     try:
         for attempt in range(ATTEMPTS):
             code, out, err = az(*cmd)
-            if code == 0 or attempt == ATTEMPTS - 1 or not any(s in err for s in TRANSIENT + retry):
+            if code == 0 or attempt == ATTEMPTS - 1 or not any(s in err for s in retryable):
                 break
             time.sleep(10 * (attempt + 1))
     finally:

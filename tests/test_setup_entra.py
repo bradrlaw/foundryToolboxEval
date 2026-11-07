@@ -43,6 +43,16 @@ class SetupEntraTests(unittest.TestCase):
         self.assertEqual(merged, {"api": ["a", "b"], "x": ["x1"], "graph": ["g"]})
         self.assertEqual(len(existing[0]["resourceAccess"]), 1)  # input not mutated
 
+    def test_pre_authorize_adds_the_scope_and_keeps_other_entries(self):
+        existing = [{"appId": "keep", "delegatedPermissionIds": ["other"]},
+                    {"appId": "c1", "delegatedPermissionIds": ["other"]}]
+        merged = setup_entra.pre_authorize(existing, ["c1", "c2"], "scope")
+        self.assertEqual(merged, [{"appId": "keep", "delegatedPermissionIds": ["other"]},
+                                  {"appId": "c1", "delegatedPermissionIds": ["other", "scope"]},
+                                  {"appId": "c2", "delegatedPermissionIds": ["scope"]}])
+        self.assertEqual(existing[1]["delegatedPermissionIds"], ["other"])  # input not mutated
+        self.assertEqual(setup_entra.pre_authorize(merged, ["c1", "c2"], "scope"), merged)
+
     def test_upsert_env(self):
         text = "FOUNDRY_PROJECT_ENDPOINT=https://x\n# ENTRA_TENANT_ID=<tenant>\nENTRA_API_APP_ID=old\n"
         out = setup_entra.upsert_env(text, {"ENTRA_TENANT_ID": "t", "ENTRA_API_APP_ID": "new", "ENTRA_OAUTH_CLIENT_APP_ID": "c"})

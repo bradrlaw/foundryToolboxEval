@@ -17,10 +17,8 @@ Exit codes: 0 all turns passed, 1 some failed, 2 setup error (invalid cases, mis
 from __future__ import annotations
 
 import argparse
-import json
 import re
 import sys
-from datetime import datetime, timezone
 from pathlib import Path
 
 from azure.core.exceptions import ClientAuthenticationError
@@ -29,6 +27,7 @@ from dotenv import load_dotenv
 from evals import auth, telemetry
 from evals.cases import ROOT, CaseError, fill_caller, json_equal, load_cases
 from evals.reasons import Failure, summary_line
+from evals.results import write_run
 from evals.toolbox_errors import AGENT_NOT_RUN
 
 MAX_MESSAGE = 300
@@ -231,11 +230,7 @@ def main(argv: list[str] | None = None) -> int:
         print("Some turns did not run: the agent's OAuth tool connection needs the signed-in user's consent. "
               "Open the link printed above, approve, then rerun.", file=sys.stderr)
 
-    args.out.mkdir(parents=True, exist_ok=True)
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    out = args.out / f"run-{stamp}.json"
-    out.write_text(json.dumps({"agent": target.AGENT_NAME, "timestamp": stamp, "results": results}, indent=2),
-                   encoding="utf-8")
+    out = write_run(args.out, lambda stamp: {"agent": target.AGENT_NAME, "timestamp": stamp, "results": results})
     print(f"results: {out}")
     return 0 if passed == len(results) else 1
 

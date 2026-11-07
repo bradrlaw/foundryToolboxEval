@@ -35,7 +35,6 @@ import sys
 import time
 from collections import Counter
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
@@ -55,6 +54,7 @@ from pydantic import ValidationError
 from evals import __version__, auth, telemetry, toolbox_errors
 from evals.cases import ROOT, CaseError, fill_caller, format_error, json_equal, load_cases, schema_validator
 from evals.reasons import Failure, summary_line
+from evals.results import write_run
 
 CLIENT_INFO = Implementation(name="foundry-toolbox-tests", version=__version__)
 AUTH_PROBE_PROTOCOL = "2025-11-25"
@@ -523,12 +523,14 @@ def resolve_target(args: argparse.Namespace) -> Target:
     scope, endpoint = auth.FOUNDRY_SCOPE, args.endpoint
     if not endpoint and args.config:
         try:
-            toolbox = json.loads(args.config.read_text(encoding="utf-8-sig")).get("toolbox") or {}
+            config = json.loads(args.config.read_text(encoding="utf-8-sig"))
         except (OSError, ValueError) as e:
             raise SetupError(f"cannot read {args.config}: {e}") from e
-        endpoint, scope = toolbox.get("mcp_endpoint"), toolbox.get("token_scope", scope)
-        if not endpoint:
+        toolbox = config.get("toolbox") if isinstance(config, dict) else None
+        endpoint = toolbox.get("mcp_endpoint") if isinstance(toolbox, dict) else None
+        if not isinstance(endpoint, str) or not endpoint:
             raise SetupError(f"{args.config} has no toolbox.mcp_endpoint")
+        scope = toolbox.get("token_scope") or scope
     if not endpoint and (project := os.environ.get("FOUNDRY_PROJECT_ENDPOINT")):
         name = args.toolbox or os.environ.get("FOUNDRY_TOOLBOX_NAME") or DEFAULT_TOOLBOX
         endpoint = f"{project.rstrip('/')}/toolboxes/{name}/mcp?api-version=v1"
@@ -590,11 +592,8 @@ def main(argv: list[str] | None = None) -> int:
     if why := summary_line(results):
         print(why)
 
-    args.out.mkdir(parents=True, exist_ok=True)
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    out = args.out / f"run-{stamp}.json"
-    out.write_text(json.dumps({"endpoint": target.endpoint, "timestamp": stamp, **info, "results": results},
-                              indent=2), encoding="utf-8")
+    out = write_run(args.out, lambda stamp: {"endpoint": target.endpoint, "timestamp": stamp, **info,
+                                             "results": results})
     print(f"results: {out}")
     return 0 if passed == len(results) else 1
 

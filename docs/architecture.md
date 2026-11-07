@@ -86,6 +86,7 @@ flowchart TB
         common["auth.py: Entra tokens, caller claims<br/>telemetry.py: spans"]
         terr["toolbox_errors.py<br/>consent and tool-source failures"]
         reasons["reasons.py<br/>failure reason codes"]
+        runfiles["results.py<br/>run files"]
     end
     mcpsdk["mcp SDK client"]
     assertai["assert-ai"]
@@ -110,6 +111,8 @@ flowchart TB
     cases --> files
     rep --> results
     run & rae & rep --> reasons
+    run & rae --> runfiles
+    runfiles --> results
     dep --> az
 ```
 
@@ -122,6 +125,7 @@ flowchart TB
 | `evals/auth.py` | Entra tokens from `az login`, cached per scope and refreshed 5 minutes before expiry; the signed-in user's claims for placeholders |
 | `evals/toolbox_errors.py` | Recognizes toolbox errors caused by a tool source (consent needed, or the source failed) and prints consent links to the console, the only place they appear |
 | `evals/reasons.py` | Failure reason codes and what each means, shared by both runners and `report.py` |
+| `evals/results.py` | Writes each run of either runner to a new `run-<UTC timestamp>.json`; a run finishing in the same second as another waits for the next second, so no run overwrites another and names sort in run order |
 | `evals/telemetry.py` | `span()` helper and the optional App Insights exporter; does nothing without a connection string |
 | `scripts/run_assert.py` | Runs `assert-ai run` from the repo root with artifacts under `results/assert` |
 | `scripts/report.py` | Markdown reports and baseline diffs for all three result types: pass rates, failures grouped by reason, ASSERT violations with the judge's justifications and the errors of cases it couldn't score |
@@ -701,7 +705,7 @@ ignores the MCP SDK's `params._meta` copy; so a tool-test case's trace also reac
 | Agent target | Consent needed, or the agent's tools can't be listed | Not retried; the turn fails as not run, and ASSERT records a target error |
 | Agent target | Read timeout (180 s) | Not retried; the turn fails |
 | Agent-eval runner | Any exception in a turn | The turn fails with a runner error; the run continues |
-| Deploy scripts (`_az.rest`) | DNS, connection, 429, 502, 503, 504 | 6 attempts, waiting 10, 20, 30, 40, 50 s |
+| Deploy scripts (`_az.rest`) | DNS, connection, 429, 502, 503, 504, and Graph replication delays | 6 attempts, waiting 10, 20, 30, 40, 50 s. A POST is retried only when it can't have been applied (DNS or connect failure, 429, replication delay), so a lost response can't create a second app, version or secret |
 | ASSERT | Interrupted run | Completed stages are cached and reused |
 
 All runners exit 0 when every case passes, 1 when any fails, and 2 on a setup problem (invalid cases, config, sign-in,
@@ -747,7 +751,7 @@ when the sample was built, a tool error aborted the whole agent request).
 
 | Tool, as named in the toolbox | Input | Returns | Error cases |
 | --- | --- | --- | --- |
-| `sample___get_customer` | `customer_id` (for example `C1001`) or `name` | Profile: industry, tier, region, account manager, contract value, ticker | Unknown customer or name, no input |
+| `sample___get_customer` | `customer_id` (for example `C1001`) or `name` (full or partial, matching one customer) | Profile: industry, tier, region, account manager, contract value, ticker | Unknown customer or name, a name matching several customers (the error names none of them), no input or a blank one |
 | `sample___get_market_conditions` | `industry`: manufacturing, healthcare, energy or retail | Outlook, YoY growth, sentiment, drivers, risks | Unsupported industry, missing argument |
 | `sample___get_stock_quote` | `customer_id` or `ticker` | Price, change, market cap, P/E | Privately held customer (`C1005`), unknown ticker, no input |
 | `sample___whoami`, only with `AUTH_MODE=entra` | none | The caller as the server sees them: name, username, `oid`, `tid`, roles, scopes, client app, token version, visible regions | none |

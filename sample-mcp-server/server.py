@@ -50,7 +50,7 @@ def create_server(entra: entra_auth.EntraSettings | None = None, verifier=None) 
     @mcp.tool()
     def get_customer(customer_id: str | None = None, name: str | None = None, ctx: Context | None = None) -> str:
         """Look up a customer profile (industry, tier, region, account manager, contract value, ticker).
-        Provide customer_id (e.g. C1001) or a full/partial company name."""
+        Provide customer_id (e.g. C1001) or a full/partial company name that matches one customer."""
         def run():
             customer = data.get_customer(customer_id=customer_id, name=name)
             return gate(ctx, customer) or customer

@@ -102,7 +102,7 @@ To test a different toolbox endpoint, pass `--endpoint <url>`, or copy `config\t
 .\.venv\Scripts\python scripts\report.py assert results\assert\results\<suite>\<run>
 ```
 
-Expected for the samples: tool tests 12/12 and agent evals 10/10. In the `tool_error` turns (`c-private`,
+Expected for the samples: tool tests 14/14 and agent evals 10/10. In the `tool_error` turns (`c-private`,
 `c-unknown-customer`) a tool returns an error, and the agent must explain it without leaking the raw error text. If the
 platform aborts the request instead (see Troubleshooting), those turns fail as `platform_abort`. ASSERT results are not
 fixed; the first baseline found real violations (e.g. manufacturing data applied to aerospace).

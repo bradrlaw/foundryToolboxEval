@@ -80,17 +80,21 @@ def access_denied(customer: dict, roles) -> dict | None:
 
 
 def get_customer(customer_id: str | None = None, name: str | None = None) -> dict:
-    if customer_id:
-        record = CUSTOMERS.get(customer_id.strip().upper())
+    cid = (customer_id or "").strip().upper()
+    if cid:
+        record = CUSTOMERS.get(cid)
         if not record:
             raise ToolError(f"Customer '{customer_id}' not found")
-        return {"customer_id": customer_id.strip().upper(), **record}
-    if name:
-        needle = name.strip().lower()
-        for cid, rec in CUSTOMERS.items():
-            if needle in rec["name"].lower():
-                return {"customer_id": cid, **rec}
-        raise ToolError(f"No customer matching name '{name}'")
+        return {"customer_id": cid, **record}
+    needle = (name or "").strip().lower()
+    if needle:
+        found = [cid for cid, rec in CUSTOMERS.items() if needle in rec["name"].lower()]
+        if not found:
+            raise ToolError(f"No customer matching name '{name}'")
+        if len(found) > 1:
+            # Names none of the matches: with AUTH_MODE=entra the caller may not be allowed to see them all.
+            raise ToolError(f"Name '{name}' matches more than one customer; use a more specific name or the customer_id")
+        return {"customer_id": found[0], **CUSTOMERS[found[0]]}
     raise ToolError("Provide customer_id or name")
 
 

@@ -23,6 +23,7 @@ def load(name):
 
 deploy_toolbox = load("deploy_toolbox")
 deploy_agent = load("deploy_agent")
+import _az  # noqa: E402
 
 PROJECT = "https://acct.services.ai.azure.com/api/projects/proj"
 ENV = {"FOUNDRY_PROJECT_ENDPOINT": PROJECT, "FOUNDRY_TOOLBOX_NAME": "tb", "FOUNDRY_AGENT_NAME": "agent",
@@ -159,6 +160,27 @@ class DeployAgentTests(unittest.TestCase):
     def test_delete(self):
         out = run(deploy_agent, ["--agent", "a-entra", "--delete", "--dry-run"])
         self.assertEqual(out.strip(), f"DELETE {PROJECT}/agents/a-entra?api-version=v1")
+
+
+class RestRetryTests(unittest.TestCase):
+    def attempts(self, method, error, retry=()):
+        """How many times rest() runs `az` when every run fails with this error text."""
+        with mock.patch.object(_az, "az", return_value=(1, "", f"ERROR: {error}")) as az, \
+                mock.patch.object(_az.time, "sleep"), self.assertRaises(SystemExit):
+            _az.rest(method, "https://h/x", retry=retry)
+        return az.call_count
+
+    def test_transient_errors_are_retried(self):
+        self.assertEqual(self.attempts("GET", "Bad Gateway"), _az.ATTEMPTS)
+        self.assertEqual(self.attempts("PUT", "('Connection aborted.', RemoteDisconnected())"), _az.ATTEMPTS)
+        self.assertEqual(self.attempts("GET", "Forbidden"), 1)
+
+    def test_post_is_retried_only_when_it_was_not_applied(self):
+        self.assertEqual(self.attempts("POST", "Bad Gateway"), 1)
+        self.assertEqual(self.attempts("post", "('Connection aborted.', RemoteDisconnected())"), 1)
+        self.assertEqual(self.attempts("POST", "Max retries exceeded (Caused by NameResolutionError(...))"), _az.ATTEMPTS)
+        self.assertEqual(self.attempts("POST", "Too Many Requests"), _az.ATTEMPTS)
+        self.assertEqual(self.attempts("POST", "Request_ResourceNotFound", retry=_az.GRAPH_REPLICATION), _az.ATTEMPTS)
 
 
 if __name__ == "__main__":

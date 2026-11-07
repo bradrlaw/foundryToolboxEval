@@ -106,11 +106,12 @@ def classify(message: str, data: object = None, code: int | None = None) -> Sour
 
 
 def announce_consent(consent: Iterable[tuple[str, str]], user: str | None = None) -> None:
-    """Print consent links to stderr, the only place they appear, once per tool source per process."""
+    """Print consent links to stderr, the only place they appear, once per tool source (or per link, for
+    unnamed sources) per process."""
     for source, link in consent:
-        if not link or source in _announced:
+        if not link or (source or link) in _announced:
             continue
-        _announced.add(source)
+        _announced.add(source or link)
         label = f"Tool source '{source}'" if source else "A tool source"
         print(f"\n{label} uses OAuth identity passthrough and needs a one-time consent. Open this link in a "
               f"browser signed in as {user or 'the test user'}, approve, then rerun:\n  {link}\n"

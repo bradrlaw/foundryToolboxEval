@@ -78,6 +78,13 @@ class AnnounceTests(unittest.TestCase):
         self.assertIn("Tool source 'sample'", err.getvalue())
         self.assertIn("signed in as ada@example.com", err.getvalue())
 
+    def test_unnamed_sources_print_each_link_once(self):
+        err = io.StringIO()
+        with mock.patch.object(te, "_announced", set()), contextlib.redirect_stderr(err):
+            te.announce_consent([("", LINK + "3"), ("", LINK + "4")])
+            te.announce_consent([("", LINK + "3")])
+        self.assertEqual((err.getvalue().count(LINK + "3"), err.getvalue().count(LINK + "4")), (1, 1))
+
 
 if __name__ == "__main__":
     unittest.main()
