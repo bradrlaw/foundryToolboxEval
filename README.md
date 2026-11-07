@@ -139,4 +139,5 @@ the error for each case it couldn't score (for example the Responses API's error
 GitHub Actions (`.github\workflows\ci.yml`) runs the offline checks on pushes to `main`, pull requests and manual runs:
 dependency install and `pip check`, a byte-compile of every source file, case validation and the unit tests, on Ubuntu
 with Python 3.11 and 3.14 and on Windows with 3.14. Changes that touch only docs or Markdown skip it. CI has no Azure
-credentials and calls nothing live.
+credentials and calls nothing live. Dependabot (`.github\dependabot.yml`) opens weekly PRs for the pinned Python packages
+(grouping minor and patch bumps), the sample server's base image and the workflow's actions; CI checks each one.

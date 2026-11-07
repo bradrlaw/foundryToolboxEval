@@ -135,6 +135,7 @@ flowchart TB
 | `sample-mcp-server/` | Synthetic MCP server, packaged as a container image: three tools, plus Entra token validation (`entra_auth.py`), region filtering and `whoami` with `AUTH_MODE=entra` |
 | `tests/` | Offline unit tests: no Azure access or `.env` needed |
 | `.github/workflows/ci.yml` | CI on pushes to `main` and pull requests: dependency check, byte-compile, case validation and unit tests on Ubuntu (Python 3.11 and 3.14) and Windows (3.14). Offline only; live runs would need Azure credentials, for example OIDC |
+| `.github/dependabot.yml` | Weekly update PRs for the pinned packages in both `requirements.txt` files, the sample server's base image and the CI actions |
 
 ## 4. Cases and results
 
