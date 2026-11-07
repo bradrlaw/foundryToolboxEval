@@ -43,7 +43,7 @@ Run the runners with the venv python (it has `azure-monitor-opentelemetry-export
 
 | Cloud role | Spans |
 | --- | --- |
-| `foundry-toolbox-tests` | `toolbox.test_case` (`eval.case_id`, `eval.kind`, `eval.category`, `gen_ai.tool.name`, `eval.passed`, `eval.outcome`, `eval.latency_p50_ms`, `eval.failures`, `eval.reasons`), with the MCP SDK's `MCP send <method>` spans as children |
+| `foundry-toolbox-tests` | `toolbox.test_case` (`eval.case_id`, `eval.kind`, `eval.category`, `gen_ai.tool.name`, `eval.passed`, `eval.outcome`, `eval.latency_p50_ms`, `eval.failures`, `eval.reasons`), with the MCP SDK's `MCP send <method>` spans as children and the toolbox's requests under those |
 | `foundry-agent-evals` | `eval.turn` (`eval.conversation_id`, `eval.turn_number`, `eval.category`, `eval.passed`, `eval.failures`, `eval.reasons`), with the target's `foundry_agent` and `tool:*` spans as children |
 | `foundry-agent-target` | `foundry_agent` (`gen_ai.agent.name`, `eval.platform_abort`, `eval.abort_reason`) and `tool:*` (`gen_ai.tool.name`), when ASSERT runs the target or it runs on its own |
 | `responsesapi` (Foundry) | `invoke_agent`, `chat <model>`, `execute_tool` with real tool durations |
@@ -68,8 +68,10 @@ and you can see one trace from eval turn to model and tool calls, including the 
 the target are zero-duration markers; use the server-side spans for tool latency: `execute_tool` is the agent's view (it
 includes Foundry's overhead), the toolbox's `tools/call` request the tool's.
 
-Direct tool-test calls aren't linked: the MCP SDK sends its trace context in `params._meta`, which the toolbox ignores, so
-each of its requests starts a new trace. The toolbox does continue a W3C `traceparent` HTTP header.
+The tool runner sends the same header on every request to the toolbox, which ignores the copy of the trace context that
+the MCP SDK puts in `params._meta`. Each toolbox request is a child of the runner's `MCP send` span, in the case's trace.
+`MCP send` is the round trip the runner sees, and the toolbox's request the time spent inside the toolbox; the difference
+is network and gateway overhead.
 
 ## 4. Query
 
@@ -98,11 +100,17 @@ requests | where cloud_RoleName == "agentsv2" and name startswith "tools/call"
 | summarize p50=percentile(duration,50), p95=percentile(duration,95), n=count(), failed=countif(success == false)
     by tool=tostring(customDimensions["gen_ai.tool.name"])
 
+// tool tests: the runner's round trip against the time inside the toolbox
+dependencies | where cloud_RoleName == "foundry-toolbox-tests" and name startswith "MCP send tools/call"
+| join kind=inner (requests | where cloud_RoleName == "agentsv2" | project operation_ParentId, toolbox=duration)
+    on $left.id == $right.operation_ParentId
+| summarize round_trip_p50=percentile(duration,50), toolbox_p50=percentile(toolbox,50), n=count() by name
+
 // agent requests that aborted or never ran, by reason
 dependencies | where name == "foundry_agent" and tostring(customDimensions["eval.platform_abort"]) =~ "true"
 | summarize n=count() by reason=tostring(customDimensions["eval.abort_reason"]), bin(timestamp, 1d)
 
-// full trace for one eval turn
+// full trace for one eval turn or tool-test case
 union dependencies, requests | where operation_Id == "<id>" | project timestamp, cloud_RoleName, name, duration | order by timestamp asc
 ```
 

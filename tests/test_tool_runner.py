@@ -3,6 +3,7 @@ import asyncio
 import contextlib
 import io
 import json
+import logging
 import os
 import tempfile
 import unittest
@@ -11,9 +12,11 @@ from types import SimpleNamespace
 from unittest import mock
 
 import httpx2
+from mcp.server.mcpserver import MCPServer
 from mcp.shared.exceptions import MCPError
 from mcp.types import CONNECTION_CLOSED, INTERNAL_ERROR, INVALID_PARAMS, REQUEST_TIMEOUT
 
+from evals import telemetry
 from tooltests import run
 
 TARGET = run.Target("https://toolbox.example/mcp")
@@ -282,6 +285,43 @@ class MainTests(NoTokenTestCase):
         code, _, err = self.main([case(arguments={"id": "{{caller.oid}}"})], run_all)
         self.assertEqual(code, 2)
         self.assertIn("{{caller.oid}}: no matching claim", err)
+
+
+class TraceContextTests(NoTokenTestCase):
+    def test_requests_carry_the_current_trace_as_an_http_header(self):
+        # The toolbox ignores the copy of the trace context that the MCP SDK puts in params._meta.
+        with mock.patch.dict(os.environ, {"APPLICATIONINSIGHTS_CONNECTION_STRING": ""}):
+            telemetry.init("unit-test")  # an SDK tracer provider, so spans get IDs; nothing is exported
+        root = logging.getLogger()
+        saved = (root.level, list(root.handlers))
+        server = MCPServer("echo")  # calls logging.basicConfig at INFO; undone below
+        root.setLevel(saved[0])
+        root.handlers[:] = saved[1]
+
+        @server.tool()
+        def echo(text: str) -> str:
+            return text
+
+        app = server.streamable_http_app(host="0.0.0.0")
+        sent = []
+
+        class Recorder(httpx2.ASGITransport):
+            async def handle_async_request(self, request):
+                sent.append(request)
+                return await super().handle_async_request(request)
+
+        async def go():
+            async with app.router.lifespan_context(app), run.connect(TARGET, run.HttpErrors()) as tb:
+                mark = len(sent)
+                with telemetry.span("unit.case") as sp:
+                    self.assertEqual((await tb.call("echo", {"text": "hi"})).outcome, "ok")
+                    await run.run_auth(TARGET, case(kind="auth", token="missing", expect_status=401))
+                return sent[mark:], f"{sp.get_span_context().trace_id:032x}"
+
+        with mock.patch.object(httpx2, "AsyncHTTPTransport", lambda **_: Recorder(app=app)):
+            requests, trace_id = asyncio.run(go())
+        self.assertEqual([json.loads(r.content)["method"] for r in requests], ["tools/call", "initialize"])
+        self.assertEqual([r.headers["traceparent"].split("-")[1] for r in requests], [trace_id] * 2)
 
 
 class ExplainTests(unittest.TestCase):

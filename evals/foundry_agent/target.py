@@ -76,9 +76,7 @@ def _post_responses(payload: dict) -> tuple[dict, float, int]:
     body = json.dumps(payload).encode()
     for attempt in range(MAX_ATTEMPTS):
         headers = {"Authorization": "Bearer " + auth.get_token(), "Content-Type": "application/json"}
-        if telemetry.AVAILABLE:
-            from opentelemetry.propagate import inject
-            inject(headers)  # traceparent, so Foundry's server-side spans join our trace
+        telemetry.inject(headers)
         req = urllib.request.Request(f"{PROJECT_ENDPOINT}/openai/v1/responses", data=body, headers=headers)
         start = time.perf_counter()
         try:

@@ -118,6 +118,11 @@ class HttpErrors:
         self.seen.append(HttpError(response.status_code, " ".join(text.split())[:300], jsonrpc))
 
 
+async def send_trace_context(request: httpx2.Request) -> None:
+    # The MCP SDK puts the trace context in params._meta, which the toolbox ignores; it continues this header.
+    telemetry.inject(request.headers)
+
+
 class BearerAuth(httpx2.Auth):
     def __init__(self, scope: str):
         self.scope = scope
@@ -310,7 +315,7 @@ async def connect(target: Target, http_errors: HttpErrors):
         auth=BearerAuth(target.scope),
         timeout=httpx2.Timeout(30, connect=15, read=None),
         transport=httpx2.AsyncHTTPTransport(retries=3),
-        event_hooks={"response": [http_errors.hook]},
+        event_hooks={"request": [send_trace_context], "response": [http_errors.hook]},
     ) as http, Client(
         streamable_http_client(target.endpoint, http_client=http, terminate_on_close=False),
         mode="legacy", cache=None, client_info=CLIENT_INFO, read_timeout_seconds=target.timeout,
@@ -424,7 +429,8 @@ async def run_auth(target: Target, case: dict) -> dict:
         "protocolVersion": AUTH_PROBE_PROTOCOL, "capabilities": {},
         "clientInfo": {"name": CLIENT_INFO.name, "version": CLIENT_INFO.version}}}
     async with httpx2.AsyncClient(timeout=httpx2.Timeout(target.timeout, connect=15),
-                                  transport=httpx2.AsyncHTTPTransport(retries=3)) as http:
+                                  transport=httpx2.AsyncHTTPTransport(retries=3),
+                                  event_hooks={"request": [send_trace_context]}) as http:
         start = time.perf_counter()
         try:
             r = await http.post(target.endpoint, json=body, headers=headers)

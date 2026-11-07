@@ -331,6 +331,8 @@ sequenceDiagram
 - Before each timed request the runner calls `auth.get_token`, which serves the cached token, so a token refresh never
   counts toward a call's latency.
 - `auth` cases use a separate HTTP client, because the MCP session cannot send a bad token.
+- Every request carries a W3C `traceparent` header, so the toolbox's own spans join the case's trace
+  ([§9](#9-telemetry)).
 
 ### Outcomes
 
@@ -654,7 +656,7 @@ flowchart LR
     end
     fa -.->|"W3C traceparent header"| inv
     exec -.->|"same trace"| req
-    send -.->|"params._meta context ignored,<br/>new trace"| req
+    send -.->|"W3C traceparent header"| req
     local -->|"BatchSpanProcessor and<br/>AzureMonitorTraceExporter"| appi[("Application Insights<br/>dependencies and requests tables")]
     server -->|"if the project is connected<br/>to the same resource"| appi
     tbx -->|"same connection"| appi
@@ -664,15 +666,16 @@ The first entry point to install the tracer provider sets the cloud role:
 
 | Run | Cloud role | Spans |
 | --- | --- | --- |
-| Tool tests | `foundry-toolbox-tests` | `toolbox.test_case`, with the MCP SDK's `MCP send <method>` spans as children |
+| Tool tests | `foundry-toolbox-tests` | `toolbox.test_case`, with the MCP SDK's `MCP send <method>` spans as children and the toolbox's requests under those |
 | Deterministic agent evals | `foundry-agent-evals` | `eval.turn`, with the target's `foundry_agent` and `tool:*` spans as children |
 | ASSERT, or the target run on its own | `foundry-agent-target` | `foundry_agent`, `tool:*` |
 
 `OTEL_SERVICE_NAME` overrides all three. Because the target injects `traceparent`, Foundry's server spans share the eval
 turn's `operation_Id`, so one trace runs from the eval turn through the model and tool calls, down to the toolbox's
 `agentsv2` requests. Use the server-side spans for real tool latency: `execute_tool` for the agent's view, the toolbox's
-`tools/call` requests for the tool's. Direct tool-test calls start new traces at the toolbox, which ignores the MCP SDK's
-`params._meta` context ([telemetry.md](telemetry.md#3-what-is-emitted)). The `foundry_agent` span carries
+`tools/call` requests for the tool's. The tool runner sends `traceparent` too, as an HTTP header, because the toolbox
+ignores the MCP SDK's `params._meta` copy; so a tool-test case's trace also reaches the toolbox's requests
+([telemetry.md](telemetry.md#3-what-is-emitted)). The `foundry_agent` span carries
 `eval.platform_abort` and `eval.abort_reason`; consent links never reach a span.
 
 ## 10. Reliability

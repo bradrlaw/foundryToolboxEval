@@ -15,7 +15,7 @@ import contextlib
 import os
 
 try:
-    from opentelemetry import trace
+    from opentelemetry import propagate, trace
     from opentelemetry.sdk.resources import Resource
     from opentelemetry.sdk.trace import TracerProvider
     from opentelemetry.sdk.trace.export import BatchSpanProcessor
@@ -44,6 +44,12 @@ def span(name: str, **attributes):
         for k, v in attributes.items():
             s.set_attribute(k, v)
         yield s
+
+
+def inject(headers) -> None:
+    """Add the current span's W3C trace context (traceparent) to outgoing HTTP headers, so the server joins our trace."""
+    if AVAILABLE:
+        propagate.inject(headers)
 
 
 def _sdk_provider():
