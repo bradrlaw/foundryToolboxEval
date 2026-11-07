@@ -245,7 +245,7 @@ The tool tests prove:
 - The token is delegated (`user_impersonation` scope), not app-only.
 - Role filtering works: allowed and denied lookups by ID and by name, and quotes by ticker (allowed) and by customer
   (denied).
-- Denials leak none of the customer's fields.
+- Denials carry only the denial fields, and their reason names neither the customer nor its ticker.
 
 The agent evals prove:
 
@@ -332,7 +332,9 @@ flowchart TD
 5. **Cases.**
    - Use placeholders for identity checks.
    - For each authorization rule, add an allowed case and a denied case.
-   - Check that denials leak nothing: a `schema` assertion with `not`/`required`, or `response_must_not_match`.
+   - Check that denials leak nothing. Allow only the denial's fields with a `schema` assertion and
+     `additionalProperties: false`, rather than listing forbidden fields, which misses any field you didn't think of.
+     In agent evals, use `response_must_not_match`.
 
 ## 8. Limits and observations
 
