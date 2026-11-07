@@ -68,7 +68,9 @@ The Entra stack ([docs/entra.md](../docs/entra.md)) runs beside it:
   `consent_link`) and no message. A tool source that fails to list returns HTTP 400 `McpProtocolException encountered while
   enumerating tools` with the same error list inside.
 - Tool calls through the OAuth2 connection took about 1.1-1.5 s, against about 0.3 s through the unauthenticated one;
-  `tools/list` took about 0.3 s on both. Both apps kept one warm replica.
+  `tools/list` took about 0.3 s on both. Both apps kept one warm replica. Toolbox spans in Application Insights put the
+  difference inside Foundry: an OAuth `tools/call` spent 490-980 ms in the toolbox, against 90-115 ms without auth, and
+  the rest of the round trip (network and client) was about 150-190 ms in both.
 
 ## Agent
 
@@ -100,4 +102,6 @@ az containerapp update -n sample-mcp-entra -g <sample-rg> --image <acr-name>.azu
 .\.venv\Scripts\python scripts\deploy_agent.py --agent customer-assistant-oauth --toolbox sample-customer-toolbox-oauth
 ```
 
-If `az acr build` crashes printing logs (Windows codepage), set `$env:PYTHONIOENCODING="utf-8"`; the build still completes.
+If `az acr build` crashes printing logs (a `UnicodeEncodeError` from the Windows console codepage, even with
+`$env:PYTHONIOENCODING="utf-8"`), the build still runs to completion in the registry. Before updating the apps, check that
+`az acr task list-runs -r <acr-name> --top 1 -o table` shows it `Succeeded`.

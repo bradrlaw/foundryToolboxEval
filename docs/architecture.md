@@ -708,8 +708,10 @@ ignores the MCP SDK's `params._meta` copy; so a tool-test case's trace also reac
 | Deploy scripts (`_az.rest`) | DNS, connection, 429, 502, 503, 504, and Graph replication delays | 6 attempts, waiting 10, 20, 30, 40, 50 s. A POST is retried only when it can't have been applied (DNS or connect failure, 429, replication delay), so a lost response can't create a second app, version or secret |
 | ASSERT | Interrupted run | Completed stages are cached and reused |
 
-All runners exit 0 when every case passes, 1 when any fails, and 2 on a setup problem (invalid cases, config, sign-in,
-consent, connection).
+Both runners exit 0 when every case passes, 1 when any fails, and 2 on a setup problem: invalid cases, a missing endpoint
+or config, or no sign-in. Only the tool runner's first connection is part of setup, so there a connection failure or a
+tool source that needs consent exits 2; the agent runner fails the affected turns and runs the rest.
+`scripts/run_assert.py` exits 2 on usage errors and otherwise returns ASSERT's exit code.
 
 ## 11. Sample deployment
 

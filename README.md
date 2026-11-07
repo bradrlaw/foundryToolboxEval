@@ -90,7 +90,9 @@ never ran. Unordered expected calls are paired with distinct calls, and non-stri
 `1`); see [architecture.md](docs/architecture.md#scoring-a-turn).
 
 Both runners validate their cases first and exit 0 when everything passes, 1 when a case fails, and 2 on invalid cases or a
-setup error (config, sign-in, consent, connection). Each result keeps `failures` (messages) and a parallel `reasons` list
+setup error (a missing endpoint or config, or no `az login`). The tool runner also exits 2 when its first connection
+fails, including a tool source that needs consent; the agent runner fails the affected turns instead. Each result keeps
+`failures` (messages) and a parallel `reasons` list
 with one code per message (all codes are described in `evals\reasons.py`), and the console ends with the number of failed
 cases per reason. Validate case files without running them:
 
