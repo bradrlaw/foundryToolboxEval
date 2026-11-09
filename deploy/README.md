@@ -92,32 +92,58 @@ The Entra stack ([docs/entra.md](../docs/entra.md)) runs beside it:
 
 ## ASSERT findings
 
-Both behaviors ran in November 2026 against `customer-assistant` v2 (`gpt-4-1-mini`), judged by `gpt-5.6-sol`, and every
-case was scored. These runs are the baselines for later ones (`report.py assert <run> --baseline <run>`).
+Both behaviors ran in November 2026 against `customer-assistant` (`gpt-4-1-mini`), judged by `gpt-5.6-sol`, and every
+case was scored. The v2 runs are the baselines for later ones (`report.py assert <run> --baseline <run>`). Versions 3 and
+4 add grounding rules to the agent's instructions (`scripts\deploy_agent.py`), each written against the violations of the
+version before. Cases violated, prompts and scenarios together:
 
-| Behavior | Cases | Dimension | Prompts violated | Scenarios violated |
-| --- | ---: | --- | ---: | ---: |
-| `ungrounded_figures` | 36 | `figure_grounding` | 10 of 24 | 5 of 12 |
-| `tool_error_handling` | 18 | `graceful_error` | 1 of 12 | 1 of 6 |
+| Behavior | Cases | Dimension | v2 (baseline) | v3 | v4 |
+| --- | ---: | --- | ---: | ---: | ---: |
+| `ungrounded_figures` | 36 | `figure_grounding` | 15 | 11 | 9 |
+| `ungrounded_figures` | 36 | `overrefusal` | 12 | 9 | 6 |
+| `tool_error_handling` | 18 | `graceful_error` | 2 | 1 | 1 |
+| `tool_error_handling` | 18 | `policy_violation` | 3 | 3 | 1 |
 
-- **Under pressure, the agent fills gaps with its own figures.** In 13 of the 15 ungrounded-figures violations the user
+In the baseline:
+
+- **Under pressure, the agent filled gaps with its own figures.** In 13 of the 15 ungrounded-figures violations the user
   insisted. In 10, a tool had returned no data (a privately held company, an unknown ticker or customer, an unsupported
   industry): the agent said so, then supplied a share price, P/E, valuation, growth rate or contract value anyway, twice
   with advice to put it in a valuation memo or a lender appendix (`harm_actionability`). The other five: a currency
   conversion at an invented rate, a contract value that contradicted the tool's, a user's remembered figure restated as
   confirmed, manufacturing data stretched to aerospace, and a claim to have checked records the tools don't return.
-- The judge's `overrefusal` flags (8 of 24 prompts, 4 of 12 scenarios) fall on those same replies. None is a refusal:
-  each misses a permissible behavior (relay the data faithfully, say it is unavailable, or ask which customer) through
-  the same ungrounded content.
-- **Tool errors are mostly handled well.** Two replies to an unsupported industry didn't name the supported ones, though
+- The judge's `overrefusal` flags fell on those same replies. None was a refusal: each missed a permissible behavior
+  (relay the data faithfully, say it is unavailable, or ask which customer) through the same ungrounded content.
+- **Tool errors were mostly handled well.** Two replies to an unsupported industry didn't name the supported ones, though
   the tool's error lists them, and one turned an unknown ticker into a claim that no listing exists anywhere. One
   `pii_leakage` flag was for naming the customer's (synthetic) account manager.
+
+With the grounding rules:
+
+- **v4 cleared 6 of the 15 `figure_grounding` violations and added none** (exact McNemar test on the paired cases,
+  p = 0.03). In `tool_error_handling`, replies to an unsupported industry now name the supported ones (6 of 6, against 4
+  of 6). The deterministic agent evals still pass: 30 of 30 runs on the main suite and 18 of 18 on the Entra suite, with
+  `--repetitions 3`. Each version ran once, with the judge at temperature 1.0, on the test cases the rules were written
+  against, so a fresh test set is the fairer check.
+- **The user's word still beats the instructions.** The 9 remaining `figure_grounding` violations failed in all three
+  versions, and each follows a direct user instruction that the rules forbid. Six adopt a figure the user supplied (a
+  VP's contract value instead of the tool's, a share price "from an earlier chat" for a private company, a market cap
+  calculated from the user's price and share count), two fill an unsupported industry with general-knowledge or
+  relabeled manufacturing figures, and one converts a contract value at the user's planning rate. The one
+  `tool_error_handling` violation claims a cross-exchange ticker search that no tool call made. Neither round of rules
+  moved these cases; the next levers are a stronger model, or a check of each figure in a reply against the tool results
+  before the user sees it.
+- From v3 the agent often words an access denial as a missing app role rather than "not authorized", so the Entra
+  suite's denial turns accept any mention of a permission or role.
 
 ## Agent
 
 Prompt agent `customer-assistant` (model `gpt-4-1-mini`) with the toolbox endpoint as an MCP tool (`require_approval: never`).
+Its instructions (`INSTRUCTIONS` in `scripts\deploy_agent.py`) allow only figures a tool returned, treat figures the user
+gives as unverified, and say how to report a tool error; each rule answers an [ASSERT finding](#assert-findings).
 Create a new version with `.\.venv\Scripts\python scripts\deploy_agent.py [--model <deployment>] [--dry-run]`.
-Invoke: `POST {project}/openai/v1/responses` with `agent_reference`.
+Invoke: `POST {project}/openai/v1/responses` with `agent_reference`. The reference names no version, so every run gets the
+latest one.
 
 ## Redeploy
 

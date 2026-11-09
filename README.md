@@ -128,10 +128,19 @@ which catches raw platform-failure replies and leaked internals. The judge needs
 To judge another agent, set `$env:FOUNDRY_AGENT_NAME` first. A turn the agent never ran (missing consent, or its tools
 couldn't be listed) is recorded as a target error and not scored.
 
-Findings so far ([deploy/README.md](deploy/README.md#assert-findings)): when a tool returns no data and the user insists,
-the agent often supplies an estimate of its own (`figure_grounding` violated in 15 of 36 cases), while it handles tool
-errors well (`graceful_error` violated in 2 of 18). Tool errors, which aborted the agent request through October 2026,
-now reach the model as text.
+To measure an agent change, deploy it and rerun a behavior under a new run name. ASSERT reuses the suite's test cases and
+reruns only inference and judging, so the report compares the same cases:
+
+```powershell
+.\.venv\Scripts\python scripts\run_assert.py evals\configs\ungrounded_figures.yaml --override run=agent-v4
+.\.venv\Scripts\python scripts\report.py assert results\assert\results\foundry-toolbox-ungrounded-figures\agent-v4 --baseline results\assert\results\foundry-toolbox-ungrounded-figures\baseline-n36
+```
+
+Findings so far ([deploy/README.md](deploy/README.md#assert-findings)): when a tool returned no data and the user
+insisted, agent v2 often supplied an estimate of its own (`figure_grounding` violated in 15 of 36 cases), while it handled
+tool errors well (`graceful_error` violated in 2 of 18). Grounding rules in v4's instructions cut the `figure_grounding`
+violations to 9; each one left follows a direct user instruction that the rules forbid. Tool errors, which aborted the
+agent request through October 2026, now reach the model as text.
 
 ## Reports
 

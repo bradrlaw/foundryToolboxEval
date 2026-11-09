@@ -29,6 +29,10 @@ Checks: expected tool calls (+ param matching), `must_not_call`, response regex 
   calls + params, ordered, `must_not_call`, response regex, latency; multi-turn by `conversation_id`). ASSERT does not
   assert specific call parameters, so the two complement each other. Both ASSERT behaviors were scored in full in
   November 2026; those runs are the baselines ([findings](../deploy/README.md#assert-findings)).
+- Agent grounding: instructions done. Grounding rules in the agent's instructions (v4) cut the `figure_grounding`
+  violations from 15 to 9 of 36 and the `tool_error_handling` policy violations from 3 to 1 of 18, and the deterministic
+  agent evals still pass. Each violation left follows a direct user instruction that the rules forbid
+  ([findings](../deploy/README.md#assert-findings)).
 - Reports (`scripts/report.py`: baseline diffs, failures grouped by reason, ASSERT violations with the judge's
   justifications) and App Insights telemetry (`docs/telemetry.md`): done. Every failure carries a reason code
   (`evals/reasons.py`) in the result files and spans. Traces run from the eval turn to the toolbox's requests, for open
@@ -84,9 +88,8 @@ Checks: expected tool calls (+ param matching), `must_not_call`, response regex 
 
 - Multi-turn fidelity (`previous_response_id` or Foundry conversations instead of text replay); provenance for ASSERT
   runs.
-- Agent grounding: instruct `customer-assistant` not to supply figures that no tool returned, even when the user
-  insists, and to name the supported options a tool error lists; then rerun both ASSERT behaviors against their
-  baselines (`report.py assert <run> --baseline <run>`).
+- Grounding beyond prompting: rerun both ASSERT behaviors on a fresh test set, since v4's rules were written against the
+  current one, then try a stronger agent model or a check of each figure in a reply against the tool results.
 - Foundry cloud evaluation as a server-side alternative.
 - Identity: several test identities in one run (a role matrix, each case tagged with the identity it expects); the Entra
   suites in live CI, which need a test user who has consented; hosted agents, which forward `x-agent-foundry-call-id` to
