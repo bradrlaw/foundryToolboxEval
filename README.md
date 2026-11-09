@@ -83,14 +83,20 @@ Cases can check the caller's identity with `{{caller.oid}}`, `{{caller.tid}}`, `
 
 Calls the agent `--agent`, else `FOUNDRY_AGENT_NAME` (default `customer-assistant`), through the Responses API and checks
 tool calls and arguments, `must_not_call`, `max_tool_calls` (the most calls a turn may make, expected or not), response
-patterns and latency. Turns sharing a `conversation_id` run in order as one conversation.
+patterns and latency. Turns sharing a `conversation_id` run in order as one conversation. Each later turn continues the
+previous turn's stored response (`previous_response_id`), so the agent keeps its earlier tool results, as in a chat.
+`--history replay` (or `FOUNDRY_AGENT_HISTORY=replay`) resends the conversation as text instead, without those results:
+asked in `c-recall` for a contract value that only its first lookup had returned, the chained agent quoted the record in
+4 of 4 runs, while the replayed one lacked it and made one up in 2 of 4 ($5,000,000 and $2,400,000; the record says
+1,250,000 USD). The run file records `history`.
 `--repetitions N` runs every conversation N times, each from a fresh history, to show how consistent the agent is. A turn
 then passes only if every run passes, and the console adds pass@1 (the mean pass rate), pass@N (passed at least once),
 pass^N (passed every run) and the flaky turns.
 Each result records its `repetition`, `extra_calls` (calls beyond those the turn expects; null when the turn doesn't check
 its calls or none are known), `tool_calls`, `response`, `latency_ms` (the final HTTP try; null when the call failed), `elapsed_ms`
 (the whole request, including retries and their waits), `attempts` (HTTP tries, including retries), what served the turn
-(`response_id`, `agent_version`, `model` and token `usage`), `platform_abort` with its `abort_reason`, and `history_gap`:
+(`response_id`, `agent_version`, `model` and token `usage`), `previous_response_id` (the stored response it continued),
+`platform_abort` with its `abort_reason`, and `history_gap`:
 an earlier turn got no answer (error or abort), so this turn's history lacks that reply. Abort reasons: `tool_error` (the platform ended the request because a tool returned
 an error) and `tool_call_failed` (because the toolbox couldn't make a call, as when the MCP server is starting from
 zero); both fail the turn as `platform_abort`, and its tool calls are still checked. `consent_required` or
@@ -128,6 +134,11 @@ which catches raw platform-failure replies and leaked internals. The judge needs
 To judge another agent, set `$env:FOUNDRY_AGENT_NAME` first. A turn the agent never ran (missing consent, or its tools
 couldn't be listed) is recorded as a target error and not scored.
 
+The target chains ASSERT's multi-turn conversations the same way, by matching each transcript to the reply it
+returned (`--history replay` turns that off). After a run that called the agent, the wrapper writes `provenance.json`
+into the run's directory: the agent version, model, toolbox versions, commit, history mode, the number of agent calls
+and how many continued a stored response, and tokens.
+
 To measure an agent change, deploy it and rerun a behavior under a new run name. ASSERT reuses the suite's test cases and
 reruns only inference and judging, so the report compares the same cases:
 
@@ -150,13 +161,16 @@ agent request through October 2026, now reach the model as text.
 .\.venv\Scripts\python scripts\report.py assert results\assert\results\<suite>\<run> [--baseline <other run dir>] [--out report.md]
 ```
 
-Tool and agent reports show what the run ran against (agent, model, toolbox versions and commit), the agent run's tokens,
-pass rates by category, latency, platform aborts, a *Why cases failed* table (failed cases per reason) and each failure
+Tool and agent reports show what the run ran against (agent, model, toolbox versions and commit), the agent run's tokens
+and how its later turns carried the conversation, pass rates by category, latency, platform aborts, a *Why cases failed*
+table (failed cases per reason) and each failure
 grouped by reason; regressions against a baseline list their reasons, and the report lists what changed since the
 baseline (for example ``agent `customer-assistant` v2 -> v3``). Runs recorded before reasons existed show `unrecorded`.
 Agent reports count the tool calls beyond those expected. For a run with `--repetitions`, they count a turn as passed only
 if every run passed, in the totals, categories and regressions alike; they add pass@1, pass@k, pass^k and the flaky turns,
-and list a failure that recurs over a turn's runs once, for example `[2/3 runs]`. The ASSERT report adds each violation with the judge's justification per dimension, and
+and list a failure that recurs over a turn's runs once, for example `[2/3 runs]`. The ASSERT report adds what the run ran
+against (from `provenance.json`, and what changed since a baseline that has one), each violation with the judge's
+justification per dimension, and
 the error for each case it couldn't score (for example the Responses API's error code and message).
 
 ## Unit tests and CI

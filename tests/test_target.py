@@ -3,6 +3,7 @@ import email.message
 import io
 import json
 import os
+import tempfile
 import unittest
 import urllib.error
 from unittest import mock
@@ -224,6 +225,81 @@ class RunAgentTests(unittest.TestCase):
             (span,) = exporter.get_finished_spans()
             self.assertEqual({k: v for k, v in span.attributes.items()
                               if k.startswith(("gen_ai.agent.version", "gen_ai.usage."))}, expected)
+
+    def test_a_continued_call_names_the_previous_response_and_still_the_agent(self):
+        data = {"id": "resp_2", "status": "completed", "output": []}
+        exporter = InMemorySpanExporter()
+        provider = TracerProvider()
+        provider.add_span_processor(SimpleSpanProcessor(exporter))
+        with mock.patch.object(target, "_tracer", provider.get_tracer("test")), \
+                mock.patch.object(target, "_post_responses", return_value=(data, 50.0, 1, 50.0)) as post:
+            target.run_agent([{"role": "user", "content": "and the price?"}], "resp_1")
+        self.assertEqual(post.call_args.args[0], {
+            "input": [{"role": "user", "content": "and the price?"}], "previous_response_id": "resp_1",
+            "agent_reference": {"type": "agent_reference", "name": target.AGENT_NAME}})
+        (span,) = exporter.get_finished_spans()
+        self.assertEqual((span.attributes["eval.previous_response_id"], span.attributes["gen_ai.response.id"]),
+                         ("resp_1", "resp_2"))
+
+
+def answered(text, response_id=None, abort=False):
+    return {"text": text, "platform_abort": abort, "abort_reason": "tool_error" if abort else None, "tool_calls": [],
+            "response_id": response_id, "agent_version": "4" if response_id else None, "model": None,
+            "usage": {"input_tokens": 9, "output_tokens": 1, "total_tokens": 10} if response_id else None}
+
+
+class ChatHistoryTests(unittest.TestCase):
+    """chat() gets ASSERT's transcript, which says nothing of stored responses."""
+
+    def setUp(self):
+        patch = mock.patch.dict(target._answered, clear=True)
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def converse(self, replies, history="chain"):
+        """Chat through `replies` as ASSERT would, each turn sending the transcript so far. Returns what each
+        run_agent call got: (messages as (role, content), previous_response_id)."""
+        calls, transcript, pending = [], [], list(replies)
+
+        def run_agent(messages, previous_response_id=None):
+            calls.append(([(m["role"], m["content"]) for m in messages], previous_response_id))
+            return pending.pop(0)
+
+        with mock.patch.object(target, "HISTORY", history), mock.patch.object(target, "run_agent", run_agent):
+            for n in range(1, len(replies) + 1):
+                transcript.append({"role": "user", "content": f"u{n}"})
+                text = target.chat(f"u{n}", list(transcript))
+                # ASSERT's transcript may differ in surrounding whitespace.
+                transcript.append({"role": "assistant", "content": f"{text}\n"})
+        return calls
+
+    def test_chain_continues_the_response_that_answered_the_transcript_so_far(self):
+        calls = self.converse([answered("a1", "resp_1"), answered("a2", "resp_2"), answered("a3", "resp_3")])
+        self.assertEqual(calls, [([("user", "u1")], None), ([("user", "u2")], "resp_1"), ([("user", "u3")], "resp_2")])
+
+    def test_after_a_reply_with_no_stored_response_the_rest_is_sent_as_text(self):
+        abort_note = f"{target.PLATFORM_ABORT_NOTE} boom"
+        calls = self.converse([answered("a1", "resp_1"), answered(abort_note, abort=True), answered("a3", "resp_3")])
+        self.assertEqual(calls[2], ([("user", "u2"), ("assistant", f"{abort_note}\n"), ("user", "u3")], "resp_1"))
+
+    def test_replay_sends_the_whole_transcript(self):
+        calls = self.converse([answered("a1", "resp_1"), answered("a2", "resp_2")], history="replay")
+        self.assertEqual(calls[1], ([("user", "u1"), ("assistant", "a1\n"), ("user", "u2")], None))
+
+    def test_each_call_is_logged_for_the_runs_provenance(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            log = os.path.join(tmp, "served.jsonl")
+            with mock.patch.object(target, "SERVED_LOG", log), mock.patch.object(target, "HISTORY", "chain"):
+                self.converse([answered("a1", "resp_1"), answered("a2", "resp_2")])
+                with mock.patch.object(target, "run_agent", side_effect=RuntimeError("boom")), \
+                        self.assertRaises(RuntimeError):
+                    target.chat("u1")
+            with open(log, encoding="utf-8") as f:
+                lines = [json.loads(line) for line in f]
+        self.assertEqual([(x["response_id"], x["previous_response_id"], x["history"]) for x in lines],
+                         [("resp_1", None, "chain"), ("resp_2", "resp_1", "chain"), (None, None, "chain")])
+        self.assertEqual((lines[0]["agent"], lines[0]["agent_version"], lines[0]["usage"]["total_tokens"]),
+                         (target.AGENT_NAME, "4", 10))
 
 
 if __name__ == "__main__":

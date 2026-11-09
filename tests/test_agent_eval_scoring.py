@@ -212,6 +212,42 @@ class ConversationTests(unittest.TestCase):
         self.assertEqual([s["eval.repetition"] for s in spans], [1, 1, 1, 2, 2, 2])
 
 
+class ChainTests(unittest.TestCase):
+    """With chain, a turn continues the stored response that answered the turn before it."""
+
+    def converse(self, replies, chain=True):
+        seen = []
+
+        def agent(messages, previous_response_id=None):
+            seen.append(([m["content"] for m in messages], previous_response_id))
+            return replies[len(seen) - 1]
+
+        cases = [{"conversation_id": "x", "turn_number": i, "user_message": f"m{i}", "category": "c", **case()}
+                 for i in range(1, len(replies) + 1)]
+        return seen, run_conversations(cases, agent, chain=chain)
+
+    def test_a_later_turn_sends_only_its_message_and_the_previous_response(self):
+        seen, out = self.converse([{**res([], text="r1"), "response_id": "resp_1"},
+                                   {**res([], text="r2"), "response_id": "resp_2"},
+                                   {**res([], text="r3"), "response_id": "resp_3"}])
+        self.assertEqual(seen, [(["m1"], None), (["m2"], "resp_1"), (["m3"], "resp_2")])
+        self.assertEqual([r["previous_response_id"] for r in out], [None, "resp_1", "resp_2"])
+
+    def test_after_an_unanswered_turn_its_message_is_sent_again_with_the_next(self):
+        seen, out = self.converse([{**res([], text="r1"), "response_id": "resp_1"},
+                                   res([{"name": "t", "arguments": None, "output": "x"}], text="[AGENT FAILURE]",
+                                       abort=True),
+                                   {**res([], text="r3"), "response_id": "resp_3"}])
+        self.assertEqual(seen[2], (["m2", "m3"], "resp_1"))
+        self.assertEqual([r["history_gap"] for r in out], [False, False, True])
+
+    def test_replay_sends_the_conversation_even_when_replies_were_stored(self):
+        seen, out = self.converse([{**res([], text="r1"), "response_id": "resp_1"},
+                                   {**res([], text="r2"), "response_id": "resp_2"}], chain=False)
+        self.assertEqual(seen, [(["m1"], None), (["m1", "r1", "m2"], None)])
+        self.assertEqual([r["previous_response_id"] for r in out], [None, None])
+
+
 class MainTests(unittest.TestCase):
     LINE = {"conversation_id": "x", "turn_number": 1, "user_message": "Who am I?", "expected_tool_calls": [],
             "pass_criteria": "response_matches", "expected_response_pattern": "{{caller.name}}", "category": "c"}
@@ -222,8 +258,8 @@ class MainTests(unittest.TestCase):
         output, as `stdout`), and the lookup."""
         seen = {}
 
-        def fake_run(cases, run_agent, repetitions):
-            seen.update(cases=cases, agent=target.AGENT_NAME, repetitions=repetitions)
+        def fake_run(cases, run_agent, repetitions, chain):
+            seen.update(cases=cases, agent=target.AGENT_NAME, repetitions=repetitions, chain=chain)
             return turns
 
         agent = agent or {"name": "n", "version": None, "model": None, "toolboxes": []}
@@ -287,6 +323,13 @@ class MainTests(unittest.TestCase):
         self.assertIn("PASS x#1 c [run 1/2] 1ms\nFAIL x#1 c [run 2/2] 1ms\n       - boom", seen["stdout"])
         self.assertIn("0/1 turns passed all 2 runs (1/2 runs passed)\npass@1 50%, pass@2 100%, pass^2 0%\n"
                       "Flaky: x#1 1/2\nFailed by reason: missing_call 1", seen["stdout"])
+
+    def test_history_flag_else_the_environment_chooses_how_turns_carry_the_conversation(self):
+        for argv, default, chain, saved_as in (((), "chain", True, "chain"), ((), "replay", False, "replay"),
+                                               (("--history", "chain"), "replay", True, "chain")):
+            with mock.patch.object(target, "HISTORY", default):
+                _, saved, seen, _ = self.main([self.turn(1)], *argv)
+            self.assertEqual((seen["chain"], saved["history"]), (chain, saved_as))
 
     def test_repetitions_must_be_at_least_one(self):
         err = io.StringIO()

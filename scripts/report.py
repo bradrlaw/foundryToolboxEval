@@ -2,10 +2,12 @@
 
 Tool and agent reports say why cases failed: failures grouped by the reason code the runners record with each
 failure (evals/reasons.py). They also say what the run ran against (agent version and model, toolbox versions,
-commit) and, against a baseline, what of that changed. Agent runs repeated with --repetitions count a turn as passed
+commit) and, against a baseline, what of that changed. Agent reports say how later turns carried the conversation
+(history chain or replay). Agent runs repeated with --repetitions count a turn as passed
 only if every run passed, and add pass@1, pass@k and pass^k and the flaky turns. Agent reports also count the tool
 calls beyond those each turn expects. ASSERT reports list each violation with the judge's justification, and the
-cases that weren't scored with the target's error.
+cases that weren't scored with the target's error; with the provenance.json that scripts/run_assert.py writes, they
+also say what the run ran against, its history mode, agent calls and tokens.
 
 Usage:
   python scripts/report.py tool   [RUN.json] [--baseline RUN.json]
@@ -167,7 +169,8 @@ def _known(value: str | None) -> str:
 
 
 def provenance_changes(current: dict, baseline: dict) -> list[str]:
-    """What the run ran against that differs from the baseline. An unknown version is not counted as a change."""
+    """What the run ran against that differs from the baseline. An unknown version is not counted as a change, and
+    neither is history for tool runs, which have none."""
     cur, base = ran_against(current), ran_against(baseline)
     out = []
     for k in [*cur, *(k for k in base if k not in cur)]:
@@ -177,7 +180,30 @@ def provenance_changes(current: dict, baseline: dict) -> list[str]:
             out.append(f"{k} {_known(base[k])} (only in the baseline)")
         elif cur[k] and base[k] and cur[k] != base[k]:
             out.append(f"{k} {base[k]} -> {cur[k]}")
+    if (mode := history_mode(current)) and (base_mode := history_mode(baseline)) and mode != base_mode:
+        out.append(f"history {base_mode} -> {mode}")
     return out
+
+
+HISTORY_TEXT = {"chain": "continued the previous turn's stored response",
+                "replay": "resent the conversation as text, without earlier tool results"}
+
+
+def history_mode(run: dict) -> str | None:
+    """How an agent run's later turns carried the conversation: chain or replay. Agent runs recorded before there
+    was a choice replayed it. None for tool runs."""
+    return (run.get("history") or "replay") if "agent" in run else None
+
+
+def ran_lines(run: dict) -> list[str]:
+    """Paragraphs on what the run ran against and how its later turns carried the conversation."""
+    lines = []
+    if ran := ran_against(run):
+        lines += ["Ran against " + ", ".join(f"{k} {_known(v)}" for k, v in ran.items()) + ".", ""]
+    if mode := history_mode(run):
+        how = HISTORY_TEXT.get(mode)
+        lines += [f"History: {mode}" + (f" (later turns {how})" if how else "") + ".", ""]
+    return lines
 
 
 def case_report(title: str, current: dict, baseline: dict | None, meanings: dict[str, str] | None = None) -> str:
@@ -193,8 +219,7 @@ def case_report(title: str, current: dict, baseline: dict | None, meanings: dict
                      f"Flaky (passed some runs, not all): {flaky}.", ""]
     else:
         lines = [f"# {title}", "", f"{run}: **{passed}/{len(cases)} passed**", ""]
-    if ran := ran_against(current):
-        lines += ["Ran against " + ", ".join(f"{k} {_known(v)}" for k, v in ran.items()) + ".", ""]
+    lines += ran_lines(current)
     lines += ["| Category | Passed | Total |", "| --- | ---: | ---: |"]
     lines += [f"| {c} | {p} | {t} |" for c, (p, t) in by_category(cases).items()]
     lats = sorted(x for x in (_latency(r) for r in cases) if x)
@@ -293,13 +318,29 @@ def _assert_case(r: dict) -> str:
     return f"`{r.get('test_case_id', '?')}` ({r.get('type', '?')}{': ' + detail if detail else ''})"
 
 
+def assert_provenance(run_dir: Path) -> dict | None:
+    """The provenance.json that scripts/run_assert.py writes next to a run's results, if any."""
+    path = run_dir / "provenance.json"
+    return json.loads(path.read_text(encoding="utf-8")) if path.exists() else None
+
+
 def assert_report(run_dir: Path, baseline_dir: Path | None) -> str:
     cur = assert_rates(run_dir)
     base = assert_rates(baseline_dir) if baseline_dir else None
     lines = [f"# ASSERT: {run_dir.parent.name} / {run_dir.name}", "",
-             "Judge status: " + ", ".join(f"{k}={v}" for k, v in sorted(cur["status"].items())), "",
-             "| Case type | Dimension | Violated | Scored | Rate |" + (" Baseline rate |" if base else ""),
-             "| --- | --- | ---: | ---: | ---: |" + (" ---: |" if base else "")]
+             "Judge status: " + ", ".join(f"{k}={v}" for k, v in sorted(cur["status"].items())), ""]
+    if prov := assert_provenance(run_dir):
+        lines += ran_lines(prov)
+        calls = f"Agent calls: {prov.get('requests', 0)} ({prov.get('continued', 0)} continued a stored response)"
+        if usage := prov.get("usage"):
+            calls += (f". Tokens: {usage.get('total_tokens') or 0:,} ({usage.get('input_tokens') or 0:,} input, "
+                      f"{usage.get('output_tokens') or 0:,} output)")
+        lines += [calls + ".", ""]
+        if baseline_dir and (base_prov := assert_provenance(baseline_dir)) and ran_against(base_prov):
+            changes = "; ".join(provenance_changes(prov, base_prov)) or "none"
+            lines += [f"Changed since the baseline `{baseline_dir.name}`: {changes}.", ""]
+    lines += ["| Case type | Dimension | Violated | Scored | Rate |" + (" Baseline rate |" if base else ""),
+              "| --- | --- | ---: | ---: | ---: |" + (" ---: |" if base else "")]
     for (ctype, dim), (v, n) in cur["rates"].items():
         row = f"| {ctype} | {dim} | {v} | {n} | {v / n:.0%} |"
         if base:

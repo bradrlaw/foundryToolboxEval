@@ -135,6 +135,12 @@ With the grounding rules:
   before the user sees it.
 - From v3 the agent often words an access denial as a missing app role rather than "not authorized", so the Entra
   suite's denial turns accept any mention of a permission or role.
+- **Chaining the turns changed nothing measurable here.** Rerun with each later turn continuing the stored response
+  (run `agent-v4-chain` on the same test set; all 24 later scenario turns continued one), v4 violated
+  `figure_grounding` in 8 of 36 cases, against 9 when replayed. The case that cleared is a single-turn prompt, which
+  chaining can't affect, so it is run-to-run variation. These violations follow the user's word, not a lost tool
+  result; chaining matters when an answer depends on an earlier tool result, as in the agent evals' `c-recall`, where
+  the replayed agent made up a contract value in 2 of 4 runs and the chained one quoted the record in 4 of 4.
 
 ## Agent
 

@@ -166,6 +166,14 @@ class ProvenanceReportTests(unittest.TestCase):
             self.assertNotIn("Changed since the baseline", text)
         self.assertNotIn("Ran against", report.case_report("T", old, None))
 
+    def test_agent_reports_say_how_later_turns_carried_the_conversation(self):
+        chained = ran(agent="assistant", history="chain")
+        text = report.case_report("Agent evals", chained, ran(agent="assistant"))
+        self.assertIn("History: chain (later turns continued the previous turn's stored response).", text)
+        # Agent runs from before the choice replayed the conversation.
+        self.assertIn("- Changed since the baseline: history replay -> chain", text)
+        self.assertNotIn("History:", report.case_report("Tool tests", ran(), None))
+
 
 class AssertReportTests(unittest.TestCase):
     DESIGN = {"behavior": "Unsupported assertions", "data_availability": "tool_error", "pressure": "user_insists"}
@@ -207,6 +215,26 @@ class AssertReportTests(unittest.TestCase):
     def test_target_errors_that_do_not_parse_are_kept(self):
         self.assertEqual(report._readable_error("Responses API 500: {cut off"), "Responses API 500: {cut off")
         self.assertEqual(report._readable_error("[AGENT NOT RUN: no consent]"), "[AGENT NOT RUN: no consent]")
+
+    def test_provenance_says_what_the_run_ran_against_and_what_changed(self):
+        score = {"type": "prompt", "test_case_id": "tc1", "judge_status": "ok",
+                 "verdict": {"dimensions": {"policy_violation": False}}}
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = self.write_run(tmp, [score], [])
+            base_dir = run_dir.parent / "run0"
+            base_dir.mkdir()
+            (base_dir / "scores.jsonl").write_text(json.dumps(score) + "\n", encoding="utf-8")
+            for where, prov in ((run_dir, ran(agent="assistant", history="chain", requests=4, continued=2,
+                                              usage={"input_tokens": 900, "output_tokens": 100, "total_tokens": 1000})),
+                                (base_dir, ran(agent_version="1", agent="assistant", history="replay"))):
+                (where / "provenance.json").write_text(json.dumps(prov), encoding="utf-8")
+            text = report.assert_report(run_dir, base_dir)
+            without = report.assert_report(run_dir, None)
+        self.assertIn("Ran against agent `assistant` v2, model `gpt-4-1-mini`, toolbox `tb` v3, commit `abc1234`.\n\n"
+                      "History: chain (later turns continued the previous turn's stored response).\n\n"
+                      "Agent calls: 4 (2 continued a stored response). Tokens: 1,000 (900 input, 100 output).", text)
+        self.assertIn("Changed since the baseline `run0`: agent `assistant` v1 -> v2; history replay -> chain.", text)
+        self.assertNotIn("Changed since", without)
 
 
 if __name__ == "__main__":

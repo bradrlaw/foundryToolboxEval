@@ -11,7 +11,7 @@ OIDC token, so the repository stores no Azure credential. The offline checks sta
 | --- | --- |
 | Triggers | `schedule` (daily, 12:00 UTC) and `workflow_dispatch`; one run at a time |
 | Identity | A user-assigned managed identity with **Foundry User** on the project, trusted through a federated credential for the `live` environment |
-| Suites | `data/tool-tests/sample-toolbox.jsonl` (14 cases) against `sample-customer-toolbox`, then `data/agent-evals/sample-toolbox.jsonl` (10 turns) against `customer-assistant`. The agent evals run even if the tool tests fail |
+| Suites | `data/tool-tests/sample-toolbox.jsonl` (14 cases) against `sample-customer-toolbox`, then `data/agent-evals/sample-toolbox.jsonl` (12 turns) against `customer-assistant`. The agent evals run even if the tool tests fail |
 | Output | The tool and agent reports from `scripts/report.py`, in the job summary. Result files stay on the runner |
 | Telemetry | Spans go to App Insights with `cloud_RoleInstance` set to `github-actions-<run id>` ([telemetry.md](telemetry.md#2-configure)) |
 | Status | The job fails if either suite fails. In a suite's log, exit code 1 means failed cases and 2 a setup error |
@@ -137,7 +137,7 @@ A public repository's logs and job summaries are public.
   workflow on the Actions tab.
 - Scheduled runs can start late, or be dropped, when GitHub Actions is busy, most often at the start of an hour. Move the
   cron minute if that matters.
-- Each run spends the agent's model tokens on 10 turns.
+- Each run spends the agent's model tokens on 12 turns.
 
 ## 6. Troubleshooting
 

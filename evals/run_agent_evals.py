@@ -13,6 +13,10 @@ agent version and model, toolbox versions; evals/provenance.py) and its token to
 a turn passes only if every run passes (pass^N), and the console adds pass@1, pass@N and pass^N and the flaky turns.
 Each turn also records `extra_calls`, its tool calls beyond those it expects; `max_tool_calls` makes too many fail.
 
+--history chain (the default, or $FOUNDRY_AGENT_HISTORY) continues each later turn from the previous turn's stored
+response (previous_response_id), so the agent keeps the tool results it already has, as in a real chat. --history replay
+sends the conversation so far as text instead: the user's messages and the agent's replies, without tool results.
+
 Cases may use {{caller.oid}}, {{caller.tid}}, {{caller.name}} and {{caller.username}}, filled from the
 signed-in user's token. A turn the agent could not run at all (consent_required, tool_listing_failed)
 fails with that reason; consent links are printed to the console only, never saved. Each failure message
@@ -153,8 +157,12 @@ def extra_calls(case: dict, result: dict | None) -> int | None:
     return max(0, len(result["tool_calls"]) - len(case["expected_tool_calls"]))
 
 
-def run_conversations(cases: list[dict], agent, repetitions: int = 1) -> list[dict]:
-    """Run each conversation's turns in order, sending the accumulated history to `agent`.
+def run_conversations(cases: list[dict], agent, repetitions: int = 1, chain: bool = True) -> list[dict]:
+    """Run each conversation's turns in order with `agent(messages)`.
+
+    With `chain`, a turn that follows an answered turn continues that turn's stored response:
+    `agent(messages, previous_response_id=...)`, where `messages` are only those the response hasn't seen. Without it,
+    or when a reply has no response id, the agent gets the conversation so far as text.
 
     With `repetitions`, every conversation runs that many times, each from a fresh history: all conversations
     once, then all of them again, so a brief platform problem doesn't fail every run of one conversation.
@@ -167,23 +175,25 @@ def run_conversations(cases: list[dict], agent, repetitions: int = 1) -> list[di
     results = []
     for repetition in range(1, repetitions + 1):
         for conv_id, turns in convs.items():
-            results += _run_conversation(conv_id, sorted(turns, key=lambda t: t["turn_number"]), agent, repetition)
+            results += _run_conversation(conv_id, sorted(turns, key=lambda t: t["turn_number"]), agent, repetition,
+                                         chain)
     return results
 
 
-def _run_conversation(conv_id: str, turns: list[dict], agent, repetition: int) -> list[dict]:
+def _run_conversation(conv_id: str, turns: list[dict], agent, repetition: int, chain: bool) -> list[dict]:
     results = []
-    history: list[dict[str, str]] = []
+    pending: list[dict[str, str]] = []  # the messages the agent hasn't seen: all of them when replaying
+    previous = None  # the stored response that answered the last answered turn, when chaining
     gap = False
     for case in turns:
-        history.append({"role": "user", "content": case["user_message"]})
+        pending.append({"role": "user", "content": case["user_message"]})
         res = None
         with telemetry.span("eval.turn", **{
             "eval.kind": "agent", "eval.conversation_id": conv_id, "eval.turn_number": case["turn_number"],
             "eval.repetition": repetition, "eval.category": case["category"],
         }) as sp:
             try:
-                res = agent(list(history))
+                res = agent(list(pending), previous_response_id=previous) if previous else agent(list(pending))
                 found = score_turn(case, res)
             except Exception as e:  # a transport failure should fail the turn, not the run
                 found = [Failure("runner_error", f"runner error: {type(e).__name__}: {e}")]
@@ -203,14 +213,17 @@ def _run_conversation(conv_id: str, turns: list[dict], agent, repetition: int) -
             "elapsed_ms": _round(res.get("elapsed_ms")) if res else None,
             "attempts": res.get("attempts") if res else None,
             **{k: res.get(k) if res else None for k in SERVED},
+            "previous_response_id": previous,
             "extra_calls": extra,
             "tool_calls": [{"name": c["name"], "arguments": c["arguments"]} for c in res["tool_calls"]] if res else [],
             "response": res["text"][:500] if res else "",
         })
         if res is None or res["platform_abort"]:
             gap = True
+        elif chain and res.get("response_id"):
+            previous, pending = res["response_id"], []
         else:
-            history.append({"role": "assistant", "content": res["text"]})
+            pending.append({"role": "assistant", "content": res["text"]})
     return results
 
 
@@ -284,6 +297,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--repetitions", type=_at_least_one, default=1, metavar="N",
                     help="run every conversation N times, each from a fresh history; a turn passes only if every run "
                          "passes (default 1)")
+    ap.add_argument("--history", choices=("chain", "replay"),
+                    help="chain: continue each turn from the previous turn's stored response; replay: send the "
+                         "conversation as text, without earlier tool results (default: $FOUNDRY_AGENT_HISTORY, "
+                         "else chain)")
     ap.add_argument("--out", type=Path, default=ROOT / "results" / "agent-evals")
     args = ap.parse_args(argv)
 
@@ -313,8 +330,9 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     if args.agent:
         target.AGENT_NAME = args.agent
+    history = args.history or target.HISTORY
 
-    results = run_conversations(cases, target.run_agent, args.repetitions)
+    results = run_conversations(cases, target.run_agent, args.repetitions, history == "chain")
     for runs in by_case(results).values():  # a turn's runs together
         for r in runs:
             flags = f" [run {r['repetition']}/{args.repetitions}]" if args.repetitions > 1 else ""
@@ -333,7 +351,7 @@ def main(argv: list[str] | None = None) -> int:
 
     ran = run_provenance(results, target.PROJECT_ENDPOINT, target.AGENT_NAME)
     out = write_run(args.out, lambda stamp: {"agent": target.AGENT_NAME, "timestamp": stamp,
-                                             "repetitions": args.repetitions, "provenance": ran,
+                                             "repetitions": args.repetitions, "history": history, "provenance": ran,
                                              "usage": total_usage(results), "results": results})
     print(f"results: {out}")
     return 0 if all(r["passed"] for r in results) else 1

@@ -48,7 +48,12 @@ Checks: expected tool calls (+ param matching), `must_not_call`, response regex 
 - Provenance: done. Tool and agent run files record the commit, each toolbox's default version and, for agent runs, the
   agent version and model; agent turns record their response id, agent version, model, token usage and `elapsed_ms` (the
   whole request, retries included). Reports show these and what changed since the baseline, and agent spans carry the
-  agent version and tokens. ASSERT runs don't record provenance yet.
+  agent version and tokens. ASSERT runs record theirs in the run's `provenance.json` (`scripts/run_assert.py`), with the
+  number of agent calls and how many continued a stored response.
+- Multi-turn fidelity: done. A later turn continues the previous turn's stored response (`previous_response_id`), in the
+  deterministic runner and the ASSERT target alike, so the agent keeps its earlier tool results; `--history replay`
+  resends the text as before. In the sample suite's `c-recall`, the chained agent quoted a contract value from its
+  earlier lookup in 4 of 4 runs; the replayed one lacked it and made one up in 2 of 4.
 - Agent scoring: done. `--repetitions N` reruns every conversation from a fresh history; a turn passes only if every
   run passes, and the console and reports add pass@1, pass@N, pass^N and the flaky turns. `max_tool_calls` fails a turn
   that makes too many calls, and every turn that checks its calls records `extra_calls`, the calls beyond those expected.
@@ -86,8 +91,6 @@ Checks: expected tool calls (+ param matching), `must_not_call`, response regex 
 
 ## Next
 
-- Multi-turn fidelity (`previous_response_id` or Foundry conversations instead of text replay); provenance for ASSERT
-  runs.
 - Grounding beyond prompting: rerun both ASSERT behaviors on a fresh test set, since v4's rules were written against the
   current one, then try a stronger agent model or a check of each figure in a reply against the tool results.
 - Foundry cloud evaluation as a server-side alternative.

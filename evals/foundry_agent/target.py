@@ -2,12 +2,17 @@
 
 Each toolbox call the agent makes (mcp_call output items) is re-emitted as an OpenInference TOOL span
 so the ASSERT judge can cite tool names, arguments, and results.
+
+A later turn continues the earlier turn's stored response (previous_response_id), so the agent keeps the tool
+results it already has, as in a real chat. FOUNDRY_AGENT_HISTORY=replay instead sends the conversation as text.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -32,6 +37,14 @@ PROJECT_ENDPOINT = os.environ.get("FOUNDRY_PROJECT_ENDPOINT", "").rstrip("/")
 if not PROJECT_ENDPOINT:
     raise RuntimeError("Set FOUNDRY_PROJECT_ENDPOINT in .env (see .env.example)")
 AGENT_NAME = os.environ.get("FOUNDRY_AGENT_NAME", "customer-assistant")
+# chain: a later turn continues the previous turn's stored response. replay: every request carries the conversation
+# as text, without the earlier turns' tool results.
+HISTORY_MODES = ("chain", "replay")
+HISTORY = (os.environ.get("FOUNDRY_AGENT_HISTORY") or "chain").strip().lower()
+if HISTORY not in HISTORY_MODES:
+    raise RuntimeError(f"FOUNDRY_AGENT_HISTORY must be chain or replay, not {HISTORY!r}")
+# scripts/run_assert.py sets this to collect what served each ASSERT call.
+SERVED_LOG = os.environ.get("FOUNDRY_EVAL_SERVED_LOG")
 
 REQUEST_TIMEOUT_S = 180
 # Local DNS outages have lasted minutes, so connection failures get about 2.5 minutes of backoff.
@@ -151,7 +164,10 @@ def _served(data: dict) -> dict:
 
 
 def _record_served(span, served: dict) -> None:
-    """The OpenTelemetry GenAI attributes of an agent invocation: the agent version and the tokens it used."""
+    """The OpenTelemetry GenAI attributes of an agent invocation: the response id, the agent version and the
+    tokens it used."""
+    if served["response_id"]:
+        span.set_attribute("gen_ai.response.id", served["response_id"])
     if served["agent_version"] is not None:
         span.set_attribute("gen_ai.agent.version", served["agent_version"])
     for k in ("input_tokens", "output_tokens"):
@@ -166,8 +182,11 @@ def _aborted(span, text: str, reason: str, calls: list, meta: dict) -> dict:
     return {"text": text, "platform_abort": True, "abort_reason": reason, "tool_calls": calls, **meta}
 
 
-def run_agent(messages: list[dict[str, str]]) -> dict:
-    """Call the agent once. Returns text, tool_calls [{name, arguments, output}], platform_abort, abort_reason,
+def run_agent(messages: list[dict[str, str]], previous_response_id: str | None = None) -> dict:
+    """Call the agent once with `messages`, continuing the stored response `previous_response_id` if given: the
+    agent then has that conversation, tool results included, and `messages` are only what follows it.
+
+    Returns text, tool_calls [{name, arguments, output}], platform_abort, abort_reason,
     latency_ms, attempts, elapsed_ms, and the response_id, agent_version, model and usage (input, output and
     total tokens) of the response, which are null when the call failed with an HTTP error. latency_ms covers the
     final HTTP attempt only; elapsed_ms also covers token fetches, earlier attempts and retry waits.
@@ -193,11 +212,13 @@ def run_agent(messages: list[dict[str, str]]) -> dict:
         span.set_attribute("gen_ai.operation.name", "invoke_agent")
         span.set_attribute("gen_ai.agent.name", AGENT_NAME)
         span.set_attribute("input.value", messages[-1]["content"])
+        # Every request names the agent, a continued one too: without it the API asks for a model.
+        payload = {"input": messages, "agent_reference": {"type": "agent_reference", "name": AGENT_NAME}}
+        if previous_response_id:
+            payload["previous_response_id"] = previous_response_id
+            span.set_attribute("eval.previous_response_id", previous_response_id)
         try:
-            data, latency_ms, attempts, elapsed_ms = _post_responses({
-                "input": messages,
-                "agent_reference": {"type": "agent_reference", "name": AGENT_NAME},
-            })
+            data, latency_ms, attempts, elapsed_ms = _post_responses(payload)
         except ResponsesAPIError as e:
             meta = {"latency_ms": e.latency_ms, "attempts": e.attempts, "elapsed_ms": e.elapsed_ms, **NOT_SERVED}
             if e.status == 400 and "An error occurred invoking" in e.body:
@@ -249,17 +270,69 @@ def run_agent(messages: list[dict[str, str]]) -> dict:
         return {"text": text, "platform_abort": False, "abort_reason": None, "tool_calls": calls, **meta}
 
 
+# ASSERT passes chat() only the transcript, so the response that answered each transcript is found by its content.
+_answered: dict[str, str] = {}
+_answered_lock = threading.Lock()
+MAX_ANSWERED = 10_000
+_served_lock = threading.Lock()
+
+
+def _transcript_key(messages: list[dict[str, str]]) -> str:
+    text = json.dumps([[m["role"], m["content"].strip()] for m in messages], ensure_ascii=False)
+    return hashlib.sha256(text.encode()).hexdigest()
+
+
+def _remember(messages: list[dict[str, str]], response_id: str) -> None:
+    with _answered_lock:
+        if len(_answered) >= MAX_ANSWERED:
+            del _answered[next(iter(_answered))]
+        _answered[_transcript_key(messages)] = response_id
+
+
+def _continuation(messages: list[dict[str, str]]) -> tuple[str | None, list[dict[str, str]]]:
+    """The stored response that answered the longest prefix of `messages` ending in a reply, and what follows it;
+    (None, messages) when no prefix was answered here."""
+    with _answered_lock:
+        for end in range(len(messages) - 1, 0, -1):
+            if messages[end - 1]["role"] == "assistant":
+                response_id = _answered.get(_transcript_key(messages[:end]))
+                if response_id:
+                    return response_id, messages[end:]
+    return None, messages
+
+
+def _log_served(out: dict | None, previous_response_id: str | None) -> None:
+    """Append what served one call to SERVED_LOG, one JSON line per call; `out` is None when the call raised."""
+    if not SERVED_LOG:
+        return
+    line = {"agent": AGENT_NAME, "history": HISTORY, "previous_response_id": previous_response_id,
+            **{k: (out or {}).get(k) for k in ("response_id", "agent_version", "model", "usage", "abort_reason")}}
+    with _served_lock, open(SERVED_LOG, "a", encoding="utf-8") as f:
+        f.write(json.dumps(line) + "\n")
+
+
 def chat(message: str, history: list[dict[str, str]] | None = None) -> str:
     """ASSERT entry point. Raises AgentNotRun when the agent could not run, which ASSERT records as a
-    target_error and leaves unscored; a tool_error abort returns its note for the judge to see."""
+    target_error and leaves unscored; a tool_error abort returns its note for the judge to see.
+
+    In chain mode a later turn continues the stored response that answered the transcript so far; a transcript
+    with no answered prefix (a first turn, or a reply that failed) is sent as text."""
     messages = [
         {"role": t["role"], "content": str(t.get("content") or "")}
         for t in (history or [])
         if t.get("role") in ("user", "assistant")
     ] or [{"role": "user", "content": message}]
-    out = run_agent(messages)
+    previous, pending = _continuation(messages) if HISTORY == "chain" else (None, messages)
+    try:
+        out = run_agent(pending, previous)
+    except Exception:
+        _log_served(None, previous)
+        raise
+    _log_served(out, previous)
     if out["abort_reason"] in toolbox_errors.AGENT_NOT_RUN:
         raise AgentNotRun(out["text"])
+    if HISTORY == "chain" and out["response_id"] and not out["platform_abort"]:
+        _remember(messages + [{"role": "assistant", "content": out["text"]}], out["response_id"])
     return out["text"]
 
 

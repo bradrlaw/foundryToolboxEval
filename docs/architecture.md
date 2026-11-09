@@ -123,8 +123,8 @@ flowchart TB
 | Module | Responsibility |
 | --- | --- |
 | `tooltests/run.py` | MCP client for the toolbox: one session per run, outcome classification, assertions, latency percentiles, reconnects |
-| `evals/run_agent_evals.py` | Replays multi-turn conversations against the agent, optionally several times over, and scores every turn |
-| `evals/foundry_agent/target.py` | Calls the agent through the Responses API with retries, reads `mcp_call` and `message` output items, detects platform aborts and turns the agent never ran (`abort_reason`), and emits agent and tool spans. Its `chat()` is ASSERT's callable target |
+| `evals/run_agent_evals.py` | Runs multi-turn conversations against the agent, each later turn continuing the previous turn's stored response (or replaying the text), optionally several times over, and scores every turn |
+| `evals/foundry_agent/target.py` | Calls the agent through the Responses API with retries, continuing a stored response when given one, reads `mcp_call` and `message` output items, detects platform aborts and turns the agent never ran (`abort_reason`), and emits agent and tool spans. Its `chat()` is ASSERT's callable target: it continues the stored response behind a transcript and logs what served each call |
 | `evals/cases.py` | Finds, parses and validates JSONL cases (JSON Schema plus cross-field and cross-file rules), and fills `{{caller.*}}` placeholders |
 | `evals/auth.py` | Entra tokens from `az login`, cached per scope and refreshed 5 minutes before expiry; the signed-in user's claims for placeholders |
 | `evals/toolbox_errors.py` | Recognizes toolbox errors caused by a tool source (consent needed, or the source failed) and prints consent links to the console, the only place they appear |
@@ -132,7 +132,7 @@ flowchart TB
 | `evals/results.py` | Writes each run of either runner to a new `run-<UTC timestamp>.json`; a run finishing in the same second as another waits for the next second, so no run overwrites another and names sort in run order. Also groups a repeated run's results by turn for pass rates, flaky turns and extra calls |
 | `evals/provenance.py` | Records what a run ran against: the commit and whether the working tree had changes, each toolbox's default version, and for agent runs the agent version and its model. Versions come only from `FOUNDRY_PROJECT_ENDPOINT`; what can't be read is null, and a failed lookup never fails a run |
 | `evals/telemetry.py` | `span()` helper and the optional App Insights exporter; does nothing without a connection string |
-| `scripts/run_assert.py` | Runs `assert-ai run` from the repo root with artifacts under `results/assert` |
+| `scripts/run_assert.py` | Runs `assert-ai run` from the repo root with artifacts under `results/assert`, and writes the run's `provenance.json` |
 | `scripts/report.py` | Markdown reports and baseline diffs for all three result types: pass rates, failures grouped by reason, what tool and agent runs ran against and what of that changed, ASSERT violations with the judge's justifications and the errors of cases it couldn't score |
 | `scripts/validate_eval_jsonl.py` | Validates case files without running them |
 | `scripts/deploy_toolbox.py`, `deploy_agent.py`, `_az.py` | Create the connection (no auth, OAuth2 or UserEntraToken), toolbox version and agent version through `az rest`; for OAuth2, also the client secret and redirect URI on the client app |
@@ -275,6 +275,7 @@ classDiagram
         +string agent
         +string timestamp
         +int repetitions
+        +string history
         +Provenance provenance
         +object usage
         +list~AgentResult~ results
@@ -299,6 +300,7 @@ classDiagram
         +float elapsed_ms
         +int attempts
         +string response_id
+        +string previous_response_id
         +string agent_version
         +string model
         +object usage
@@ -332,6 +334,9 @@ classDiagram
   that can't be read is null.
 - `abort_reason` is `tool_error`, `tool_call_failed`, `consent_required` or `tool_listing_failed` when `platform_abort`
   is true.
+- `history` is how later turns carried the conversation, `chain` or `replay` ([Multi-turn
+  conversations](#multi-turn-conversations)); agent runs recorded before it existed replayed text. A result's
+  `previous_response_id` is the stored response the turn continued, null for a first turn and when replaying.
 - `report.py` matches results to a baseline by `case_id`, or by conversation and turn, and lists what the run ran
   against that differs from the baseline's. An unknown version doesn't count as a change. A turn that ran several times
   counts once: it passed only if every run passed, its latency is the median over its runs, and a failure that recurs
@@ -461,8 +466,8 @@ sequenceDiagram
     participant M as Agent model
     participant TB as Toolbox
     participant S as MCP server
-    R->>T: run_agent(messages) or chat(message, history)
-    T->>F: POST /openai/v1/responses<br/>agent_reference, bearer token, traceparent
+    R->>T: run_agent(messages, previous_response_id) or chat(message, history)
+    T->>F: POST /openai/v1/responses<br/>agent_reference, previous_response_id if continuing,<br/>bearer token, traceparent
     F->>TB: tools/list as the signed-in user
     break a tool source needs the user's consent
         TB-->>F: CONSENT_REQUIRED with a consent link
@@ -576,15 +581,17 @@ How `expected_tool_calls` are matched:
 ```mermaid
 flowchart TD
     group["group turns by conversation_id,<br/>sort by turn_number"] --> rep["run r of --repetitions N"]
-    rep --> conv["next conversation,<br/>from an empty history"]
+    rep --> conv["next conversation:<br/>no messages, no response to continue"]
     conv --> next["next turn"]
-    next --> user["append the user message to the history"]
-    user --> invoke["run_agent with the full history,<br/>inside an eval.turn span"]
+    next --> user["add the user message to the messages to send"]
+    user --> invoke["run_agent with those messages, continuing<br/>the stored response if there is one,<br/>inside an eval.turn span"]
     invoke --> score["score_turn<br/>an exception fails the turn"]
     score --> answered{"agent answered?"}
-    answered -->|"yes"| asst["append the reply to the history"]
-    answered -->|"no: runner error or platform abort"| gap["later turns report history_gap"]
-    asst --> more{"more turns?"}
+    answered -->|"yes, chain"| chain["continue this response next;<br/>no messages left to send"]
+    answered -->|"yes, replay"| asst["add the reply to the messages to send"]
+    answered -->|"no: runner error or platform abort"| gap["keep the messages for the next request;<br/>later turns report history_gap"]
+    chain --> more{"more turns?"}
+    asst --> more
     gap --> more
     more -->|"yes"| next
     more -->|"no"| convs{"more conversations?"}
@@ -594,9 +601,22 @@ flowchart TD
     reps -->|"no"| done(["one result per turn and run"])
 ```
 
-Each request replays the conversation as text: every user message, plus the assistant replies received so far. Tool
-results from earlier turns are not replayed, so the agent calls tools again when it needs the data. Using
-`previous_response_id` or Foundry conversations would keep that state; this is listed under Next in [plan.md](plan.md).
+`--history`, else `FOUNDRY_AGENT_HISTORY`, sets how later turns carry the conversation:
+
+- `chain` (the default): a later turn sends only its new user message, with `previous_response_id` naming the stored
+  response that answered the turn before. The service continues from everything that response held, earlier tool calls
+  and their results included, as it does for a user in a chat. The request must still name the agent
+  (`agent_reference`); the service rejects a continuation without it. A turn that got no answer leaves nothing new to
+  continue, so its user message goes again with the next turn's, after the last answered response. A reply without a
+  `response_id` is added as text instead.
+- `replay`: every request sends the conversation as text, every user message plus the replies received so far. Earlier
+  tool results are not sent, so the agent has to call the tools again for data it fetched before, or answers without
+  it. Runs recorded before chaining existed replayed.
+
+The sample suite's `c-recall` tells them apart: turn 1 looks up Contoso, and turn 2 asks, without a new lookup, for its
+contract value, which only the earlier tool result holds. Chained, the agent quoted the record's 1,250,000 USD in 4 of 4
+runs. Replayed, it never had the value: in 2 of 4 runs it said so and offered a lookup, and in the other 2 it made one
+up ($5,000,000 and $2,400,000).
 
 ### Repetitions
 
@@ -648,6 +668,20 @@ If the agent never ran (missing consent, or its tools couldn't be listed), `chat
 that as a target error and leaves it unscored, so a setup problem isn't judged as a behavior violation. A `tool_error`
 abort still returns its note, for the judge to see.
 
+ASSERT gives `chat()` the transcript so far and no conversation ID, so the target chains by transcript. For each reply it
+returns, it remembers the transcript up to and including that reply, and the reply's stored response. A later turn
+whose transcript starts with a remembered one continues that response (`previous_response_id`) and sends only the
+messages after it. Any other transcript is sent as text: a first turn, one that follows a failed reply, or one cached
+by an earlier process. ASSERT passes each reply back as the target returned it; the comparison ignores surrounding
+whitespace. `run_assert.py --history replay` (or `FOUNDRY_AGENT_HISTORY=replay`) sends every transcript as text.
+
+The wrapper has the target log each agent call to a temporary file: the response, the stored response it continued,
+the agent version, the model and tokens. After a run that called the agent, it writes the run's `provenance.json`
+from that log: the `agent`, its `history` mode, `provenance` as in the run files, the agent calls (`requests`), how many
+continued a stored response (`continued`) and their total `usage`. `continued` shows whether chaining took effect: it
+stays 0 if every transcript went as text. A rerun that only reuses cached transcripts calls no agent and keeps the
+file it has. Inference is cached by run name, so compare chain and replay under different run names.
+
 ```text
 results/assert/results/<suite>/
   taxonomy.json, test_set.jsonl, ...   suite stages, reused by later runs
@@ -655,10 +689,12 @@ results/assert/results/<suite>/
     inference_set.jsonl                transcripts with per-turn trace data
     scores.jsonl, metrics.json         judge verdicts and metrics
     manifest.json, config.yaml         stage status and the resolved config
+    provenance.json                    what the run ran against, written by run_assert.py
 ```
 
 `report.py assert` reads `scores.jsonl` for the violation rate per dimension and the judge's justification for each
-violation, and `inference_set.jsonl` for the target error behind each case the judge couldn't score.
+violation, `inference_set.jsonl` for the target error behind each case the judge couldn't score, and
+`provenance.json` for what the run ran against and what changed since the baseline.
 
 ### How the judge sees tool calls
 
@@ -871,6 +907,8 @@ Deploy steps and current findings: [getting-started.md](getting-started.md) and 
 | `UserEntraToken` can't get a token for a custom MCP server's audience | The Entra sample uses OAuth2 identity passthrough |
 | A denial returned as a tool error would reach the agent as text only, or abort the request as it did through October 2026 | The Entra sample returns denials as normal `access_denied` results |
 | An MCP server starting from zero takes about 20 s, and the toolbox fails agent requests meanwhile (HTTP 400 `McpProtocolException`, protocol version `2026-07-28`) | The sample servers keep one replica (`--min-replicas 1`); the target reports such turns as `platform_abort` with `abort_reason` `tool_listing_failed` or `tool_call_failed` |
+| A request that continues a stored response (`previous_response_id`) without naming the agent fails with HTTP 400 "Missing required parameter: 'model'" | The target sends `agent_reference` on every request |
+| A conversation replayed as text carries no earlier tool results, and the agent may then state a figure no tool returned | Later turns continue the stored response by default (`history` `chain`); `c-recall` checks it |
 
 ## 13. Design decisions
 
@@ -887,8 +925,10 @@ Deploy steps and current findings: [getting-started.md](getting-started.md) and 
 - **Validate first.** Bad cases stop a run before any Azure call. Exit codes are the same across runners, so CI can tell
   setup problems from test failures.
 - **Results are local JSON.** Reports and baseline diffs read those files; telemetry is optional and is not the record.
-- **Text replay for multi-turn.** Every request carries the conversation so far, which keeps runs stateless and makes any
-  turn safe to retry. The cost is that earlier tool results are not replayed.
+- **Chained multi-turn.** A later turn continues the stored response of the turn before (`previous_response_id`), so
+  the agent keeps its earlier tool results, as it does in a chat. Replaying the text dropped them, and the agent then
+  sometimes made up a figure it had fetched before. Continuing a response, unlike a Foundry conversation, needs nothing created
+  or deleted, and a retried request continues the same response. `--history replay` keeps the old behavior.
 - **No environment values in git.**
   - Tenant, subscription and resource identifiers live only in `.env`, `config/*.local.json` and
     `deploy/resources.local.md`, all git-ignored.
