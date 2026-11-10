@@ -30,7 +30,7 @@ class DataFileTests(unittest.TestCase):
         self.assertTrue(files)
         cases, problems = check_files(files)
         self.assertEqual(problems, [])
-        self.assertEqual(set(cases), {"tool", "agent"})
+        self.assertEqual(set(cases), {"tool", "agent", "calibration"})
 
 
 class ToolCaseTests(unittest.TestCase):
@@ -122,6 +122,21 @@ class AgentCaseTests(unittest.TestCase):
             self.assertEqual(len(ctx.exception.problems), 1)
 
 
+class CalibrationCaseTests(unittest.TestCase):
+    CASE = {"case": "k1", "expect": {"tool_use": "pass"}, "query": [{"role": "user", "content": "hi"}],
+            "response": [{"role": "assistant", "content": "hello"}], "tool_definitions": []}
+
+    def test_verdicts_and_duplicate_cases(self):
+        self.assertEqual(problems_for("calibration", self.CASE), [])
+        self.assertIn("is not one of ['pass', 'fail']",
+                      problems_for("calibration", {**self.CASE, "expect": {"tool_use": "maybe"}})[0])
+        self.assertIn("is not one of ['tool_use', 'grounded_adherence']",
+                      problems_for("calibration", {**self.CASE, "expect": {"task_adherence": "pass"}})[0])
+        p = problems_for("calibration", self.CASE, self.CASE)
+        self.assertEqual(len(p), 1)
+        self.assertIn("duplicate case 'k1'", p[0])
+
+
 class PlaceholderTests(unittest.TestCase):
     def test_unknown_fields_are_flagged(self):
         problems = problems_for("tool", call(arguments={"id": "{{caller.email}}"}))
@@ -168,15 +183,18 @@ class KindDetectionTests(unittest.TestCase):
     def test_detect_kind_by_folder_then_content(self):
         self.assertEqual(detect_kind(ROOT / "data" / "tool-tests" / "x.jsonl"), "tool")
         self.assertEqual(detect_kind(ROOT / "data" / "agent-evals" / "x.jsonl"), "agent")
+        self.assertEqual(detect_kind(ROOT / "data" / "evaluator-calibration" / "x.jsonl"), "calibration")
         self.assertEqual(detect_kind(Path("elsewhere/x.jsonl"), {"conversation_id": "c"}), "agent")
         self.assertEqual(detect_kind(Path("elsewhere/x.jsonl"), {"case_id": "c"}), "tool")
+        self.assertEqual(detect_kind(Path("elsewhere/x.jsonl"), {"case": "c", "expect": {}}), "calibration")
         self.assertIsNone(detect_kind(Path("elsewhere/x.jsonl"), {}))
 
     def test_expand_paths_globs(self):
         files = expand_paths([ROOT / "data" / "tool-tests" / "*.jsonl"])
         self.assertTrue(files)
         self.assertTrue(all(f.suffix == ".jsonl" for f in files))
-        self.assertEqual({detect_kind(f) for f in expand_paths([ROOT / "data" / "**" / "*.jsonl"])}, {"tool", "agent"})
+        self.assertEqual({detect_kind(f) for f in expand_paths([ROOT / "data" / "**" / "*.jsonl"])},
+                         {"tool", "agent", "calibration"})
         self.assertEqual(expand_paths(["missing.jsonl"]), [Path("missing.jsonl")])
 
 

@@ -1,7 +1,8 @@
-"""Validate tool-test and agent-eval JSONL files against schemas/ plus cross-field rules.
+"""Validate tool-test, agent-eval and evaluator-calibration JSONL files against schemas/ plus cross-field rules.
 
-Usage: python scripts/validate_eval_jsonl.py [--kind tool|agent] FILE.jsonl [...]
-The kind is inferred from the folder (data/tool-tests, data/agent-evals) or the first record.
+Usage: python scripts/validate_eval_jsonl.py [--kind tool|agent|calibration] FILE.jsonl [...]
+The kind is inferred from the folder (data/tool-tests, data/agent-evals, data/evaluator-calibration) or the first
+record.
 """
 import argparse
 import sys

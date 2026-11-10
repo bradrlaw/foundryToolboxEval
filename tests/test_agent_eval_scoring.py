@@ -97,11 +97,20 @@ class ScoreTurnTests(unittest.TestCase):
         fails = score_turn(c, res([], text="price is 99 sorry", latency=100))
         self.assertEqual([f.reason for f in fails], ["response_mismatch", "forbidden_response", "latency"])
 
+    def test_figures_from_tools_fails_a_figure_no_tool_returned(self):
+        c = case(figures_from_tools=True)
+        quote = {"name": "t", "arguments": {}, "output": '{"price": 84.12, "market_cap_usd": 12400000000}'}
+        self.assertEqual(score_turn(c, res([quote], text="It trades at $84.12, a $12.4 billion company.")), [])
+        self.assertEqual(score_turn(c, res([quote], text="It trades at $84.12, with a P/E of 21.5.")),
+                         [("ungrounded_figure", "figures no tool returned in the conversation: 21.5")])
+        self.assertEqual(score_turn(c, res([], text="It was $84.12."), [quote["output"]]), [])
+        self.assertEqual(score_turn(case(), res([], text="The P/E is 21.5.")), [])
+
     def test_platform_abort_fails_the_turn_without_checking_the_reply(self):
         # The abort note quotes the raw tool error, which must not pass or fail the reply checks.
         c = case(pass_criteria="both", expected_tool_calls=[{"tool": "t", "params": {"id": "C1"}}],
-                 expected_response_pattern="private", response_must_not_match="C1")
-        note = "[AGENT FAILURE: ...] Customer C1 is privately held"
+                 expected_response_pattern="private", response_must_not_match="C1", figures_from_tools=True)
+        note = "[AGENT FAILURE: HTTP 400] Customer C1 is privately held"
         r = {**res([{"name": "t", "arguments": None, "output": ""}], text=note, abort=True), "abort_reason": "tool_error"}
         self.assertEqual(score_turn(c, r), [("platform_abort", note)])
         r["tool_calls"][0]["name"] = "u"
@@ -134,6 +143,14 @@ class ConversationTests(unittest.TestCase):
         self.assertEqual([r["turn_number"] for r in out], [1, 2])
         self.assertEqual(seen, [[("user", "m1")], [("user", "m1"), ("assistant", "r1"), ("user", "m2")]])
         self.assertEqual([r["history_gap"] for r in out], [False, False])
+
+    def test_figures_from_tools_accepts_what_an_earlier_turn_returned(self):
+        replies = iter([res([{"name": "t", "arguments": {}, "output": '{"acv": 1250000}'}], text="Found Contoso."),
+                        res([], text="Their contract is $1.25 million, not $2 million.")])
+        cases = [{"conversation_id": "x", "turn_number": i, "user_message": f"m{i}", "category": "c",
+                  **case(figures_from_tools=True)} for i in (1, 2)]
+        out = run_conversations(cases, lambda history: next(replies))
+        self.assertEqual(out[1]["failures"], ["figures no tool returned in the conversation: $2 million"])
 
     def test_runner_error_fails_turn_and_is_not_replayed(self):
         seen = []
@@ -259,12 +276,14 @@ class MainTests(unittest.TestCase):
         seen = {}
 
         def fake_run(cases, run_agent, repetitions, chain):
-            seen.update(cases=cases, agent=target.AGENT_NAME, repetitions=repetitions, chain=chain)
+            seen.update(cases=cases, agent=target.AGENT_NAME, version=target.AGENT_VERSION, repetitions=repetitions,
+                        chain=chain)
             return turns
 
         agent = agent or {"name": "n", "version": None, "model": None, "toolboxes": []}
         out = io.StringIO()
         with tempfile.TemporaryDirectory() as tmp, mock.patch.object(target, "AGENT_NAME", "default-agent"), \
+                mock.patch.object(target, "AGENT_VERSION", None), \
                 mock.patch("evals.run_agent_evals.load_dotenv"), mock.patch("evals.telemetry.init"), \
                 mock.patch("evals.auth.get_token", return_value="tok"), \
                 mock.patch("evals.auth.caller_claims", return_value={"name": "Ada (Admin)"}), \
@@ -297,7 +316,12 @@ class MainTests(unittest.TestCase):
         code, saved, seen, _ = self.main([self.turn(1)], "--agent", "my-agent")
         self.assertEqual(code, 0)
         self.assertEqual((seen["agent"], saved["agent"]), ("my-agent", "my-agent"))
+        self.assertIsNone(seen["version"])
         self.assertEqual(seen["cases"][0]["expected_response_pattern"], "Ada\\ \\(Admin\\)")
+
+    def test_agent_version_flag_pins_the_version_that_answers(self):
+        _, _, seen, _ = self.main([self.turn(1)], "--agent-version", "2")
+        self.assertEqual(seen["version"], "2")
 
     def test_the_run_records_what_it_ran_against_and_its_tokens(self):
         turns = [self.turn(1, agent_version="2", model="gpt-4-1-mini",

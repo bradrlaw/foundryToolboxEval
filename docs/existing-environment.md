@@ -45,7 +45,9 @@ and `repetitions`. Cover happy path, not-found/invalid input (`expect_error: tru
 
 Agent evals (`data\agent-evals\*.jsonl`, `schemas\agent-eval.schema.json`): each turn gives the prompt, expected tool calls
 (name and argument checks), `must_not_call` and `max_tool_calls` (both always enforced) and answer assertions; turns with
-the same `conversation_id` run as one conversation. Add `--repetitions 3` to the agent runner to see which turns are flaky.
+the same `conversation_id` run as one conversation. Set `"figures_from_tools": true` on turns whose reply should only
+relay tool data, to fail a figure no tool returned. Add `--repetitions 3` to the agent runner to see which turns are
+flaky.
 
 ```powershell
 .\.venv\Scripts\python scripts\validate_eval_jsonl.py data\tool-tests\mine.jsonl   # kind comes from the folder or first record; --kind overrides

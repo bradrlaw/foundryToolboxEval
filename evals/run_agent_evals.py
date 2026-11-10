@@ -6,6 +6,7 @@ Usage:
   python -m evals.run_agent_evals data/agent-evals/sample-toolbox.jsonl
   python -m evals.run_agent_evals data/agent-evals/sample-toolbox-entra.jsonl --agent customer-assistant-oauth
   python -m evals.run_agent_evals data/agent-evals/sample-toolbox.jsonl --repetitions 3
+  python -m evals.run_agent_evals data/agent-evals/sample-toolbox.jsonl --agent-version 2   # an older version
 Results are written to results/agent-evals/run-<UTC timestamp>.json, with what the run ran against (commit,
 agent version and model, toolbox versions; evals/provenance.py) and its token totals.
 
@@ -31,11 +32,12 @@ import re
 import sys
 from collections import Counter
 from pathlib import Path
+from typing import Iterable
 
 from azure.core.exceptions import ClientAuthenticationError
 from dotenv import load_dotenv
 
-from evals import auth, provenance, telemetry
+from evals import auth, figures, provenance, telemetry
 from evals.cases import ROOT, CaseError, fill_caller, json_equal, load_cases
 from evals.reasons import Failure, summary_line
 from evals.results import by_case, extra_calls_by_case, pass_rate_text, pass_rates, write_run
@@ -100,8 +102,9 @@ def _missed(expected: dict, calls: list[dict], used: set[int]) -> Failure:
     return Failure("wrong_arguments", _clip(f"{what} not made; {expected['tool']} was called with {'; '.join(map(str, args))}"))
 
 
-def score_turn(case: dict, result: dict) -> list[Failure]:
-    """Return the turn's failures (empty = pass)."""
+def score_turn(case: dict, result: dict, returned: Iterable[object] = ()) -> list[Failure]:
+    """Return the turn's failures (empty = pass). `returned` holds tool results the calls in `result` don't carry,
+    such as those of the conversation's earlier turns, which figures_from_tools also accepts."""
     if result.get("abort_reason") in AGENT_NOT_RUN:
         # Nothing to score; must_not_call and must-not-match checks would pass vacuously.
         return [Failure(result["abort_reason"], result["text"])]
@@ -143,6 +146,11 @@ def score_turn(case: dict, result: dict) -> list[Failure]:
     bad = case.get("response_must_not_match")
     if bad and not result.get("platform_abort") and re.search(bad, result["text"], re.I | re.S):
         failures.append(Failure("forbidden_response", f"response matches forbidden /{bad}/"))
+    if case.get("figures_from_tools") and not result.get("platform_abort"):
+        sources = [*returned, *(c.get("output") for c in calls)]
+        if unbacked := figures.ungrounded(result["text"], sources):
+            failures.append(Failure("ungrounded_figure", _clip("figures no tool returned in the conversation: "
+                                                               + ", ".join(unbacked))))
 
     if (limit := case.get("max_latency_ms")) and result.get("latency_ms") is not None and result["latency_ms"] > limit:
         failures.append(Failure("latency", f"latency {result['latency_ms']:.0f}ms > {limit}ms"))
@@ -184,6 +192,7 @@ def _run_conversation(conv_id: str, turns: list[dict], agent, repetition: int, c
     results = []
     pending: list[dict[str, str]] = []  # the messages the agent hasn't seen: all of them when replaying
     previous = None  # the stored response that answered the last answered turn, when chaining
+    returned: list[object] = []  # the tool results of the earlier turns, for figures_from_tools
     gap = False
     for case in turns:
         pending.append({"role": "user", "content": case["user_message"]})
@@ -194,7 +203,7 @@ def _run_conversation(conv_id: str, turns: list[dict], agent, repetition: int, c
         }) as sp:
             try:
                 res = agent(list(pending), previous_response_id=previous) if previous else agent(list(pending))
-                found = score_turn(case, res)
+                found = score_turn(case, res, returned)
             except Exception as e:  # a transport failure should fail the turn, not the run
                 found = [Failure("runner_error", f"runner error: {type(e).__name__}: {e}")]
             failures, reasons = [f.message for f in found], [f.reason for f in found]
@@ -218,6 +227,8 @@ def _run_conversation(conv_id: str, turns: list[dict], agent, repetition: int, c
             "tool_calls": [{"name": c["name"], "arguments": c["arguments"]} for c in res["tool_calls"]] if res else [],
             "response": res["text"][:500] if res else "",
         })
+        if res:
+            returned += [c.get("output") for c in res["tool_calls"]]
         if res is None or res["platform_abort"]:
             gap = True
         elif chain and res.get("response_id"):
@@ -294,6 +305,9 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="Run agent-eval conversations against the Foundry agent and score its tool calls.")
     ap.add_argument("cases", nargs="+", help="agent-eval JSONL files or glob patterns")
     ap.add_argument("--agent", help="agent name (default: $FOUNDRY_AGENT_NAME, else customer-assistant)")
+    ap.add_argument("--agent-version", type=at_least_one, metavar="N",
+                    help="pin the agent version that answers, such as 2 (default: $FOUNDRY_AGENT_VERSION, else the "
+                         "agent's latest version)")
     ap.add_argument("--repetitions", type=at_least_one, default=1, metavar="N",
                     help="run every conversation N times, each from a fresh history; a turn passes only if every run "
                          "passes (default 1)")
@@ -330,6 +344,8 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     if args.agent:
         target.AGENT_NAME = args.agent
+    if args.agent_version:
+        target.AGENT_VERSION = str(args.agent_version)
     history = args.history or target.HISTORY
 
     results = run_conversations(cases, target.run_agent, args.repetitions, history == "chain")

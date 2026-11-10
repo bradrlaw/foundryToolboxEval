@@ -20,11 +20,11 @@ Docs: [getting started](docs/getting-started.md) (deploy and run the samples), [
 | Path | Purpose |
 | --- | --- |
 | `tooltests/` | Tool-test runner: an MCP client for the toolbox endpoint |
-| `evals/` | Deterministic agent-eval runner, Foundry cloud-evaluation runner (`run_cloud_eval.py`) and its judge prompts (`evaluators/`), the agent target ASSERT calls (`foundry_agent/target.py`), ASSERT configs (`configs/`), shared auth, case loading, retries and telemetry |
-| `schemas/` | JSON Schemas for tool-test and agent-eval JSONL |
-| `data/tool-tests/`, `data/agent-evals/` | Tool-test cases and agent-eval scenarios (JSONL) |
+| `evals/` | Deterministic agent-eval runner and its figure check (`figures.py`), Foundry cloud-evaluation runner (`run_cloud_eval.py`) with its judge prompts (`evaluators/`) and their calibration (`calibrate_evaluators.py`), the agent target ASSERT calls (`foundry_agent/target.py`), ASSERT configs (`configs/`), shared auth, case loading, retries and telemetry |
+| `schemas/` | JSON Schemas for tool-test, agent-eval and evaluator-calibration JSONL |
+| `data/tool-tests/`, `data/agent-evals/`, `data/evaluator-calibration/` | Tool-test cases, agent-eval scenarios, and turns with the verdicts this repo's evaluators should give them (JSONL) |
 | `config/` | Optional target config example; `*.local.json` is git-ignored |
-| `scripts/` | `validate_eval_jsonl.py`, `report.py`, `run_assert.py` (ASSERT wrapper), `deploy_toolbox.py` (connection + toolbox, no auth or OAuth2 identity passthrough), `deploy_agent.py`, `setup_entra.py` (Entra apps for the Entra sample) |
+| `scripts/` | `validate_eval_jsonl.py`, `report.py`, `run_assert.py` (ASSERT wrapper), `check_figures.py` (the figure check against ASSERT's judge), `deploy_toolbox.py` (connection + toolbox, no auth or OAuth2 identity passthrough), `deploy_agent.py`, `setup_entra.py` (Entra apps for the Entra sample) |
 | `sample-mcp-server/` | Synthetic MCP server (`get_customer`, `get_market_conditions`, `get_stock_quote`) to deploy and test against; run locally with `.\.venv\Scripts\python sample-mcp-server\server.py` (`http://localhost:8000/mcp`). With `AUTH_MODE=entra` it accepts only Entra user tokens, filters customers by the caller's app roles and adds `whoami` |
 | `deploy/` | Notes and findings for the deployed sample toolbox |
 | `docs/` | Setup guides, architecture, telemetry, plan |
@@ -81,11 +81,16 @@ Cases can check the caller's identity with `{{caller.oid}}`, `{{caller.tid}}`, `
 ```powershell
 .\.venv\Scripts\python -m evals.run_agent_evals data\agent-evals\sample-toolbox.jsonl   # writes results\agent-evals\run-*.json
 .\.venv\Scripts\python -m evals.run_agent_evals data\agent-evals\sample-toolbox.jsonl --repetitions 3
+.\.venv\Scripts\python -m evals.run_agent_evals data\agent-evals\sample-toolbox.jsonl --agent-version 2   # an older version
 ```
 
-Calls the agent `--agent`, else `FOUNDRY_AGENT_NAME` (default `customer-assistant`), through the Responses API and checks
-tool calls and arguments, `must_not_call`, `max_tool_calls` (the most calls a turn may make, expected or not), response
-patterns and latency. Turns sharing a `conversation_id` run in order as one conversation. Each later turn continues the
+Calls the agent `--agent`, else `FOUNDRY_AGENT_NAME` (default `customer-assistant`), at `--agent-version`, else
+`FOUNDRY_AGENT_VERSION` (default its latest), through the Responses API and checks tool calls and arguments,
+`must_not_call`, `max_tool_calls` (the most calls a turn may make, expected or not), response patterns and latency. With
+`"figures_from_tools": true`, a turn also fails when its reply states a figure (an amount, percentage, scaled number or
+multiple) that matches no number a tool returned in the conversation, within the rounding the reply shows; numbers the
+user wrote don't count ([how it works and what it misses](docs/architecture.md#the-figure-check)).
+Turns sharing a `conversation_id` run in order as one conversation. Each later turn continues the
 previous turn's stored response (`previous_response_id`), so the agent keeps its earlier tool results, as in a chat.
 `--history replay` (or `FOUNDRY_AGENT_HISTORY=replay`) resends the conversation as text instead, without those results:
 asked in `c-recall` for a contract value that only its first lookup had returned, the chained agent quoted the record in
@@ -104,9 +109,9 @@ an error) and `tool_call_failed` (because the toolbox couldn't make a call, as w
 zero); both fail the turn as `platform_abort`, and its tool calls are still checked. `consent_required` or
 `tool_listing_failed`: the agent never ran, so the turn fails.
 Failure reasons: `missing_call`, `wrong_arguments`, `wrong_order`, `forbidden_call`, `extra_calls`, `response_mismatch`,
-`forbidden_response`, `latency`, `platform_abort` and `runner_error` (no reply), or the abort reason of a turn the agent
-never ran. Unordered expected calls are paired with distinct calls, and non-string params compare as JSON (`true` is not
-`1`); see [architecture.md](docs/architecture.md#scoring-a-turn).
+`forbidden_response`, `ungrounded_figure`, `latency`, `platform_abort` and `runner_error` (no reply), or the abort
+reason of a turn the agent never ran. Unordered expected calls are paired with distinct calls, and non-string params
+compare as JSON (`true` is not `1`); see [architecture.md](docs/architecture.md#scoring-a-turn).
 
 Both runners validate their cases first and exit 0 when everything passes, 1 when a case fails, and 2 on invalid cases or a
 setup error (a missing endpoint or config, or no `az login`). The tool runner also exits 2 when its first connection
@@ -119,7 +124,7 @@ Versions are read from `FOUNDRY_PROJECT_ENDPOINT` only and are null when they ca
 running them:
 
 ```powershell
-.\.venv\Scripts\python scripts\validate_eval_jsonl.py "data\tool-tests\*.jsonl" "data\agent-evals\*.jsonl"
+.\.venv\Scripts\python scripts\validate_eval_jsonl.py "data\tool-tests\*.jsonl" "data\agent-evals\*.jsonl" "data\evaluator-calibration\*.jsonl"
 ```
 
 ## Agent evals with ASSERT
@@ -153,7 +158,9 @@ Findings so far ([deploy/README.md](deploy/README.md#assert-findings)): when a t
 insisted, agent v2 often supplied an estimate of its own (`figure_grounding` violated in 15 of 36 cases), while it handled
 tool errors well (`graceful_error` violated in 2 of 18). Grounding rules in v4's instructions cut the `figure_grounding`
 violations to 9; each one left follows a direct user instruction that the rules forbid. Tool errors, which aborted the
-agent request through October 2026, now reach the model as text.
+agent request through October 2026, now reach the model as text. On a fresh test set
+([holdout findings](deploy/README.md#on-a-fresh-test-set)) the rules cut the violations from 14 to 9 (p = 0.06), while
+the same instructions on the stronger `gpt-6-astra` had none in 35 scored cases and no tool-error violation.
 
 ## Agent evals with Foundry's evaluators
 
@@ -178,8 +185,9 @@ Their judge prompts are `evals\evaluators\<name>.md`. The runner registers each 
 
 By default Foundry judges the replies an agent-eval run already got, read by their stored `response_id`, each with up to
 `--max-turns` turns of its conversation (default: the run's longest), so the agent isn't called again. With `--target`,
-Foundry sends the first turn of each conversation to the agent (`--agent`) itself and the runner also scores that reply
-with the deterministic checks; later turns are left out, because a target run can't continue a conversation.
+Foundry sends the first turn of each conversation to the agent (`--agent` at `--agent-version`, else
+`FOUNDRY_AGENT_NAME` at `FOUNDRY_AGENT_VERSION`, as in the agent-eval runner) itself and the runner also scores that
+reply with the deterministic checks; later turns are left out, because a target run can't continue a conversation.
 
 Each turn gets a verdict: `pass`, `fail` (an evaluator failed it), `error` (an evaluator couldn't judge it, or Foundry's
 call to the agent failed), `skipped` (no evaluator applied to the turn) or `not_judged`. Each result keeps every
@@ -191,6 +199,20 @@ didn't, and 2 on a setup or API error or when the evaluation run failed, was can
 `--fail-on unjudged` it exits 1 only when a turn wasn't judged (`error` or `not_judged`): the judge's failures are
 reported but don't fail the run, as in live CI. When the judge and the agent share a model deployment they share its
 rate limit, so run one job at a time.
+
+After changing a judge prompt or the judge model, check it against the calibration cases,
+`data\evaluator-calibration\sample-toolbox.jsonl`: 11 synthetic turns, each with the verdict both evaluators should
+give it, such as a figure recalled from an earlier lookup (pass) and the same figure made up (fail), a figure taken from
+the user, a quote given without a call, and a misspelled name with no retry. The judge varies from run to run, so use
+several runs:
+
+```powershell
+.\.venv\Scripts\python -m evals.calibrate_evaluators --repetitions 3
+```
+
+It registers the prompts as the runner does, has Foundry judge every case once per run, prints each case's expected
+verdict beside every run's and lists the mismatches with the judge's score and reason. It exits 0 when every verdict
+matched, 1 when one didn't, and 2 on a setup or API error or a failed run.
 
 Findings ([deploy/README.md](deploy/README.md#foundry-evaluator-findings)): on the sample suite, Foundry's built-in
 `tool_call_accuracy` and `task_adherence` failed 3 correct turns of 12. `tool_call_accuracy` scores a correct call that

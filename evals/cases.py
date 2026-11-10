@@ -1,4 +1,4 @@
-"""Load and validate tool-test and agent-eval JSONL files against the schemas in schemas/.
+"""Load and validate tool-test, agent-eval and evaluator-calibration JSONL files against the schemas in schemas/.
 
 The JSON Schemas carry the structural rules. Cross-field rules they cannot express clearly are
 checked here: fields a case's kind or pass_criteria ignores, settings that conflict (a must_not_call tool that is also
@@ -23,8 +23,9 @@ from jsonschema.exceptions import SchemaError, ValidationError
 from jsonschema.validators import validator_for
 
 ROOT = Path(__file__).resolve().parent.parent
-SCHEMA_FILES = {"tool": "tool-test.schema.json", "agent": "agent-eval.schema.json"}
-KIND_FOLDERS = {"tool-tests": "tool", "agent-evals": "agent"}
+SCHEMA_FILES = {"tool": "tool-test.schema.json", "agent": "agent-eval.schema.json",
+                "calibration": "evaluator-calibration.schema.json"}
+KIND_FOLDERS = {"tool-tests": "tool", "agent-evals": "agent", "evaluator-calibration": "calibration"}
 
 COMMON_TOOL_FIELDS = {"case_id", "kind", "category", "notes"}
 TOOL_KIND_FIELDS = {
@@ -81,7 +82,8 @@ def _case_validator(kind: str) -> Draft202012Validator:
 
 
 def detect_kind(path: Path, first: object = None) -> str | None:
-    """'tool' or 'agent' from the folder name (data/tool-tests, data/agent-evals) or the first record."""
+    """'tool', 'agent' or 'calibration' from the folder name (data/tool-tests, data/agent-evals,
+    data/evaluator-calibration) or the first record."""
     for part in reversed(path.resolve().parent.parts):
         if part in KIND_FOLDERS:
             return KIND_FOLDERS[part]
@@ -90,6 +92,8 @@ def detect_kind(path: Path, first: object = None) -> str | None:
             return "agent"
         if "case_id" in first:
             return "tool"
+        if "expect" in first:
+            return "calibration"
     return None
 
 
@@ -135,6 +139,10 @@ def _agent_problems(case: dict) -> list[str]:
             if isinstance(value, str) and value.startswith("re:"):
                 problems += _regex_problem(value[3:], f"$.expected_tool_calls[{i}].params.{key}")
     return problems
+
+
+# Cross-field rules by kind; the schema covers calibration cases.
+KIND_PROBLEMS: dict[str, Callable[[dict], list[str]]] = {"tool": _tool_problems, "agent": _agent_problems}
 
 
 def _strings(value: object, path: str = "$"):
@@ -218,9 +226,10 @@ def _identity(kind: str, case: object) -> tuple[str, object] | None:
     """
     if not isinstance(case, dict):
         return None
-    if kind == "tool":
-        case_id = case.get("case_id")
-        return ("case_id", case_id) if isinstance(case_id, str) else None
+    if kind in ("tool", "calibration"):
+        field = "case_id" if kind == "tool" else "case"
+        case_id = case.get(field)
+        return (field, case_id) if isinstance(case_id, str) else None
     conv, turn = case.get("conversation_id"), case.get("turn_number")
     if isinstance(conv, str) and type(turn) is int and turn >= 1:
         return ("conversation turn", (conv, turn))
@@ -246,7 +255,7 @@ def _read_jsonl(path: Path) -> tuple[list[tuple[int, object]], list[str]]:
 def check_files(paths: Iterable[Path | str], kind: str | None = None) -> tuple[dict[str, list[dict]], list[str]]:
     """Validate JSONL files. Returns the valid cases grouped by kind, and every problem found.
 
-    `kind` forces 'tool' or 'agent' for every file; otherwise each file's kind is detected.
+    `kind` forces 'tool', 'agent' or 'calibration' for every file; otherwise each file's kind is detected.
     Duplicate ids and turn gaps are checked across all files of the same kind.
     """
     cases: dict[str, list[dict]] = defaultdict(list)
@@ -261,16 +270,16 @@ def check_files(paths: Iterable[Path | str], kind: str | None = None) -> tuple[d
         problems += file_problems
         file_kind = kind or detect_kind(path, rows[0][1] if rows else None)
         if file_kind is None:
-            problems.append(f"{path}: cannot tell tool tests from agent evals; pass --kind")
+            problems.append(f"{path}: cannot tell what kind of cases these are; pass --kind")
             continue
         validator = _case_validator(file_kind)
+        kind_problems = KIND_PROBLEMS.get(file_kind, lambda case: [])
         for n, case in rows:
             where = f"{path}:{n}"
             errors = sorted(validator.iter_errors(case), key=lambda e: e.json_path)
             problems += [f"{where}: {format_error(e)}" for e in errors]
             if not errors:
-                kind_problems = (_tool_problems if file_kind == "tool" else _agent_problems)(case)
-                problems += [f"{where}: {p}" for p in kind_problems + _placeholder_problems(case)]
+                problems += [f"{where}: {p}" for p in kind_problems(case) + _placeholder_problems(case)]
                 cases[file_kind].append(case)
             identity = _identity(file_kind, case)
             if identity is None:

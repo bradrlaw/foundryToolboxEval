@@ -29,10 +29,15 @@ Checks: expected tool calls (+ param matching), `must_not_call`, response regex 
   calls + params, ordered, `must_not_call`, response regex, latency; multi-turn by `conversation_id`). ASSERT does not
   assert specific call parameters, so the two complement each other. Both ASSERT behaviors were scored in full in
   November 2026; those runs are the baselines ([findings](../deploy/README.md#assert-findings)).
-- Agent grounding: instructions done. Grounding rules in the agent's instructions (v4) cut the `figure_grounding`
-  violations from 15 to 9 of 36 and the `tool_error_handling` policy violations from 3 to 1 of 18, and the deterministic
-  agent evals still pass. Each violation left follows a direct user instruction that the rules forbid
-  ([findings](../deploy/README.md#assert-findings)).
+- Agent grounding: done. Grounding rules in the agent's instructions (v4) cut the `figure_grounding` violations from 15
+  to 9 of 36 and the `tool_error_handling` policy violations from 3 to 1 of 18, and the deterministic agent evals still
+  pass. Each violation left follows a direct user instruction that the rules forbid
+  ([findings](../deploy/README.md#assert-findings)). On a fresh test set v4 cut the `figure_grounding` violations from
+  14 to 9, and the same instructions on the stronger `gpt-6-astra` to none of 35 scored, with no tool-error violation
+  ([holdout](../deploy/README.md#on-a-fresh-test-set)). Without a judge, the agent runner's `figures_from_tools` fails a
+  reply that states a figure no tool returned in the conversation (`evals/figures.py`); on the holdout transcripts it
+  caught 79 to 89% of the judge's `figure_grounding` violations and flagged 18 to 26% of the rest, most often a user's
+  figure repeated to reject it. `--agent-version` (or `FOUNDRY_AGENT_VERSION`) pins the agent version a run calls.
 - Reports (`scripts/report.py`: baseline diffs, failures grouped by reason, ASSERT violations with the judge's
   justifications) and App Insights telemetry (`docs/telemetry.md`): done. Every failure carries a reason code
   (`evals/reasons.py`) in the result files and spans. Traces run from the eval turn to the toolbox's requests, for open
@@ -64,7 +69,9 @@ Checks: expected tool calls (+ param matching), `must_not_call`, response regex 
   `grounded_adherence` replaced those two as defaults: judge prompts in `evals/evaluators/`, calibrated on synthetic
   turns and registered in the project's evaluator catalog by the runner. With `intent_resolution` they pass all 12
   turns and still fail a recalled figure the agent made up. Replayed history now sends earlier replies as
-  `output_text`, which the evaluators require.
+  `output_text`, which the evaluators require. The calibration turns and their expected verdicts are in
+  `data/evaluator-calibration/`; `python -m evals.calibrate_evaluators` has Foundry judge them again and lists every
+  verdict that differs, so a changed prompt or judge model can be checked (none of 66 differed over 3 runs).
 - Agent scoring: done. `--repetitions N` reruns every conversation from a fresh history; a turn passes only if every
   run passes, and the console and reports add pass@1, pass@N, pass^N and the flaky turns. `max_tool_calls` fails a turn
   that makes too many calls, and every turn that checks its calls records `extra_calls`, the calls beyond those expected.
@@ -80,7 +87,11 @@ Checks: expected tool calls (+ param matching), `must_not_call`, response regex 
 
 - Tool tests: `schemas/tool-test.schema.json` (`data/tool-tests/`)
 - Agent-level: `schemas/agent-eval.schema.json` (adapted from the copilot-studio-evals canonical turn: `conversation_id`, `turn_number`, `user_message`, `expected_tool_calls`, `expected_response_pattern`, `pass_criteria`, `must_not_call`, `category`)
-- Both are validated by `evals/cases.py` (JSON Schema plus cross-field rules) on load and by `scripts/validate_eval_jsonl.py`.
+- Evaluator calibration: `schemas/evaluator-calibration.schema.json` (`data/evaluator-calibration/`): a turn as this
+  repo's evaluators see it (`query`, `response`, `tool_definitions`), the verdict each should give (`expect`) and why
+  (`notes`)
+- All three are validated by `evals/cases.py` (JSON Schema plus cross-field rules) on load and by
+  `scripts/validate_eval_jsonl.py`.
 
 ## Milestones
 
@@ -103,11 +114,6 @@ Checks: expected tool calls (+ param matching), `must_not_call`, response regex 
 
 ## Next
 
-- Grounding beyond prompting: rerun both ASSERT behaviors on a fresh test set, since v4's rules were written against the
-  current one, then try a stronger agent model or a check of each figure in a reply against the tool results.
-- Cloud evaluation follow-up: keep the calibration turns for `tool_use` and `grounded_adherence` in the repo, with a
-  script that runs them and compares each verdict with the expected one, so a changed prompt can be checked the same
-  way.
 - Identity: several test identities in one run (a role matrix, each case tagged with the identity it expects); the Entra
   suites in live CI, which need a test user who has consented; hosted agents, which forward `x-agent-foundry-call-id` to
   the toolbox; recheck `UserEntraToken` for custom audiences; confirm consent survives the connection's refresh-token

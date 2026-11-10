@@ -38,6 +38,11 @@
     "pass_criteria": {"enum": ["tool_called_correctly", "response_matches", "both"]},
     "category": {"type": "string", "minLength": 1},
     "max_latency_ms": {"type": "integer", "minimum": 1},
+    "figures_from_tools": {
+      "type": "boolean",
+      "default": false,
+      "description": "Every figure in the reply (an amount, percentage, ratio or number of 10 or more) must match, at the precision written, a number a tool returned in the conversation so far; others fail the turn as ungrounded_figure. Leave it off when the reply should compute or repeat figures (see evals/figures.py)."
+    },
     "notes": {"type": "string"}
   },
   "additionalProperties": false,

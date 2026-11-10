@@ -88,7 +88,9 @@ flowchart TB
         run["tooltests/run.py"]
         rae["evals/run_agent_evals.py"]
         rce["evals/run_cloud_eval.py"]
+        cal["evals/calibrate_evaluators.py"]
         rass["scripts/run_assert.py"]
+        chk["scripts/check_figures.py"]
         rep["scripts/report.py"]
         dep["scripts/deploy_toolbox.py<br/>scripts/deploy_agent.py<br/>scripts/setup_entra.py"]
     end
@@ -101,6 +103,7 @@ flowchart TB
         runfiles["results.py<br/>run files"]
         prov["provenance.py<br/>commit, agent and toolbox versions"]
         retry["retry.py<br/>retryable statuses and waits"]
+        figs["figures.py<br/>figures in a reply<br/>that no tool returned"]
     end
     mcpsdk["mcp SDK client"]
     assertai["assert-ai"]
@@ -124,6 +127,9 @@ flowchart TB
     rce --> common
     rce --> prompts
     rce -->|"score_turn, run provenance"| rae
+    cal --> cases
+    cal -->|"evaluator catalog and evals API"| rce
+    rae & chk --> figs
     target & rce --> retry
     rass --> configs
     rass --> assertai
@@ -143,6 +149,8 @@ flowchart TB
 | `tooltests/run.py` | MCP client for the toolbox: one session per run, outcome classification, assertions, latency percentiles, reconnects |
 | `evals/run_agent_evals.py` | Runs multi-turn conversations against the agent, each later turn continuing the previous turn's stored response (or replaying the text), optionally several times over, and scores every turn |
 | `evals/run_cloud_eval.py` | Has Foundry's evaluation service judge the agent with this repo's evaluators (judge prompts in `evals/evaluators/`, registered in the project's evaluator catalog) and built-in ones: creates or reuses an evaluation, runs it over an agent run's stored responses or, with `--target`, over the first turns of case files, polls the run, and turns each output item into a verdict per turn beside that turn's deterministic result |
+| `evals/calibrate_evaluators.py` | Has this repo's evaluators judge the calibration cases in `data/evaluator-calibration/`, each with the verdicts it should get, one evaluation run per repetition, and lists the verdicts that differ ([§8](#8-foundry-evaluators)) |
+| `evals/figures.py` | Finds the figures in a reply (amounts, percentages, scaled numbers and multiples) and those that match no number in the tool results, within the rounding the reply shows. `score_turn` uses it for turns with `figures_from_tools` |
 | `evals/foundry_agent/target.py` | Calls the agent through the Responses API with retries, continuing a stored response when given one, reads `mcp_call` and `message` output items, detects platform aborts and turns the agent never ran (`abort_reason`), and emits agent and tool spans. Its `chat()` is ASSERT's callable target: it continues the stored response behind a transcript and logs what served each call |
 | `evals/cases.py` | Finds, parses and validates JSONL cases (JSON Schema plus cross-field and cross-file rules), and fills `{{caller.*}}` placeholders |
 | `evals/auth.py` | Entra tokens from `az login`, cached per scope and refreshed 5 minutes before expiry; the signed-in user's claims for placeholders |
@@ -153,6 +161,7 @@ flowchart TB
 | `evals/provenance.py` | Records what a run ran against: the commit and whether the working tree had changes, each toolbox's default version, and for agent runs the agent version and its model. Versions come only from `FOUNDRY_PROJECT_ENDPOINT`; what can't be read is null, and a failed lookup never fails a run |
 | `evals/telemetry.py` | `span()` helper and the optional App Insights exporter; does nothing without a connection string |
 | `scripts/run_assert.py` | Runs `assert-ai run` from the repo root with artifacts under `results/assert`, and writes the run's `provenance.json` |
+| `scripts/check_figures.py` | Runs the figure check over ASSERT transcripts and sets it against the judge's `figure_grounding` verdicts: how many violations it catches and how many grounded transcripts it flags |
 | `scripts/report.py` | Markdown reports and baseline diffs for tool, agent, cloud and ASSERT runs: pass rates, failures grouped by reason, what tool, agent and cloud runs ran against and what of that changed, cloud verdicts per evaluator and how the judge agrees with the checks, ASSERT violations with the judge's justifications and the errors of cases it couldn't score |
 | `scripts/validate_eval_jsonl.py` | Validates case files without running them |
 | `scripts/deploy_toolbox.py`, `deploy_agent.py`, `_az.py` | Create the connection (no auth, OAuth2 or UserEntraToken), toolbox version and agent version through `az rest`; for OAuth2, also the client secret and redirect URI on the client app |
@@ -168,7 +177,8 @@ flowchart TB
 ### Case formats
 
 Cases are JSONL, one object per line, validated against `schemas/tool-test.schema.json` and
-`schemas/agent-eval.schema.json`.
+`schemas/agent-eval.schema.json`. The calibration cases of this repo's evaluators have their own schema,
+`schemas/evaluator-calibration.schema.json` ([§8](#8-foundry-evaluators)).
 
 ```mermaid
 classDiagram
@@ -207,6 +217,7 @@ classDiagram
         +int max_tool_calls
         +string expected_response_pattern
         +string response_must_not_match
+        +bool figures_from_tools
         +string pass_criteria
         +string category
         +int max_latency_ms
@@ -244,8 +255,8 @@ identity checks need no real user in the files ([entra.md](entra.md#caller-place
 
 ### Validation
 
-Both runners validate every case before running any, and `scripts/validate_eval_jsonl.py` performs the same checks
-without running them.
+The tool and agent runners and the calibration script validate every case before running any, and
+`scripts/validate_eval_jsonl.py` performs the same checks without running them.
 
 ```mermaid
 flowchart LR
@@ -625,6 +636,7 @@ tries the turn needed, and the console shows the elapsed time of turns that need
 | `max_tool_calls` | always, if set | No more tool calls than this, expected or not | `extra_calls` |
 | `expected_response_pattern` | `pass_criteria` is `response_matches` or `both`, and the platform didn't abort | Case-insensitive regex search over the whole reply | `response_mismatch` |
 | `response_must_not_match` | the platform didn't abort | The reply does not match | `forbidden_response` |
+| `figures_from_tools` | `true`, and the platform didn't abort | Every figure in the reply matches a number some tool returned in this conversation, this turn included | `ungrounded_figure` |
 | `max_latency_ms` | always, if set | Latency of the final HTTP attempt | `latency` |
 
 A turn the agent never ran (`abort_reason` `consent_required` or `tool_listing_failed`) fails with its note and the abort
@@ -647,6 +659,47 @@ How `expected_tool_calls` are matched:
 - An unmatched expected call fails as `wrong_order` when a matching call was made out of order (`ordered` only), as
   `wrong_arguments` when the tool was called but with other arguments (the message lists them), and as `missing_call`
   otherwise.
+
+### The figure check
+
+`figures_from_tools` is a grounding check without a judge (`evals/figures.py`): every figure in the reply must match a
+number that a tool returned in the conversation so far, this turn included. A figure is a number with its currency,
+scale and percent sign, such as $84.12, 1,250,000, 12.4 billion, -2.3% or 17.3x; thousands can also be grouped with
+spaces (1 250 000), though below a million only with a no-break or thin space, since 5 100 can be two numbers. Numbers
+inside identifiers (C1001, Q3), dates and times, years, and whole numbers below 10 or in compounds such as 52-week
+aren't figures. A figure matches within the precision the reply wrote it to, so $12.4 billion matches 12,400,000,000
+and $84 matches 84.12. Signs are ignored, since replies put them in words (down 2.3%), a percentage also matches its
+fraction, and a scaled figure its unscaled number. The user's messages don't count: repeating a figure the user gave
+as fact is the failure the check exists for. With chained history the earlier turns' tool results count, so a figure
+recalled from an earlier lookup passes. Cloud runs with `--target` check Foundry's reply against the tool results in
+its output items.
+
+The check flags figures computed from tool results (a monthly value from an annual one), made-up examples, a user's
+figure repeated to correct or reject it, and numbers that state no data, as in Dynamics 365 or slide 14. It misses
+claims without a new number, such as one industry's growth given for another. So turn it on where the reply should only
+relay tool data; the sample suite does on every turn but the one that answers without tools, and with
+`--repetitions 3` both v4 and v4's instructions on `gpt-6-astra` passed all 33 checked runs, 21 of them with figures to
+match.
+
+`scripts/check_figures.py` measures the check against ASSERT's judge on `ungrounded_figures` transcripts: of the
+transcripts the judge failed for `figure_grounding`, the share the check flags too (catch rate), and of those it passed,
+the share the check flags anyway (false alarms). The rules were written against the four development runs (v2, v3, v4,
+and v4 chained), where the check caught 89 to 100% and flagged 0 to 11%. On the holdout test set
+([findings](../deploy/README.md#on-a-fresh-test-set)), with the rules unchanged:
+
+| Agent | Judge failed | Caught | False alarms |
+| --- | ---: | ---: | ---: |
+| v2 | 14 of 36 | 11 (79%) | 4 of 22 (18%) |
+| v4 | 9 of 36 | 8 (89%) | 5 of 27 (19%) |
+| v4's instructions on `gpt-6-astra` | 0 of 35 | | 9 of 35 (26%) |
+
+Three of the four misses gave one industry's figures for another, which match a tool result; in the fourth the judge
+failed a correct conversion ($2.1 billion for 2100000000). Every false alarm was of the kinds above, most often a
+user's figure repeated to reject it, which the stronger model does more often. `--lenient` also accepts the numbers the
+user wrote: it raised no false alarm on the stronger model but caught only 2 of v4's 9 violations, most of which adopt
+a figure the user gave. Telling adopting a figure from rejecting it still takes a judge, so the check is a cheap first
+filter and a regression guard for turns that only relay tool data, not a replacement for the judge. Reading thousands
+grouped with spaces came later and changes none of these results: no reply in these runs groups digits that way.
 
 ### Multi-turn conversations
 
@@ -736,7 +789,11 @@ ASSERT's own model calls go through LiteLLM to `azure/<deployment>`:
 - They use `AZURE_API_BASE`, with Entra auth when `ASSERT_AZURE_USE_AAD=1`.
 - The judge needs a large `max_tokens` (24000) for a reasoning model.
 
-Completed stages are cached, so a new run reuses the suite's categories and test set.
+Completed stages are cached, so a new run reuses the suite's categories and test set. Instructions tuned against those
+cases can fit them too closely, so check a change on new cases too: run under another suite name,
+`run_assert.py <config> --override suite=<suite>-holdout`, which generates new categories and test cases. Copy the
+original suite's `artifacts/systematize` folder into `results/assert/results/<suite>-holdout/artifacts/` first to keep
+its categories, so only the cases are new, as in the [holdout findings](../deploy/README.md#on-a-fresh-test-set).
 
 If the agent never ran (missing consent, or its tools couldn't be listed), `chat()` raises `AgentNotRun`. ASSERT records
 that as a target error and leaves it unscored, so a setup problem isn't judged as a behavior violation. A `tool_error`
@@ -834,9 +891,9 @@ sequenceDiagram
 
 | | Stored responses (default) | `--target CASES` |
 | --- | --- | --- |
-| What is judged | Each turn of an agent run (the one given, else the newest), read by its `response_id`; the agent isn't called again | Foundry's own call to the agent (`--agent`) with the first turn of each conversation |
+| What is judged | Each turn of an agent run (the one given, else the newest), read by its `response_id`; the agent isn't called again | Foundry's own call to the agent (`--agent` at `--agent-version`, else `FOUNDRY_AGENT_NAME` at `FOUNDRY_AGENT_VERSION`, else the latest version) with the first turn of each conversation |
 | What the evaluators see | Up to `--max-turns` turns of the conversation, the judged one included (default: the run's longest conversation); a chained run's earlier turns come with their tool calls and results | That turn only. Later turns are left out, because a target run can't continue a conversation |
-| Data source | Evaluation: `azure_ai_source`, scenario `responses`. Run: `azure_ai_responses`, retrieving each response with `max_num_turns` | Evaluation: a `custom` item schema (`query`, `case`) plus the sample schema. Run: `azure_ai_target_completions`, sending `{{item.query}}` to an `azure_ai_agent` target |
+| Data source | Evaluation: `azure_ai_source`, scenario `responses`. Run: `azure_ai_responses`, retrieving each response with `max_num_turns` | Evaluation: a `custom` item schema (`query`, `case`) plus the sample schema. Run: `azure_ai_target_completions`, sending `{{item.query}}` to an `azure_ai_agent` target, with a `version` when one is pinned |
 | Evaluator inputs | This repo's evaluators: `query` from `{{item.query_history_list}}` (the agent's instructions and the earlier turns with their tool calls and results, then the user's message), `response` from `{{sample.output_items}}` and `tool_definitions` from `{{item.tool_definitions}}`. Built-in evaluators: found by the service | `query` from `{{item.query}}`, `response` from `{{sample.output_items}}`, and for this repo's evaluators and built-in `tool_*` ones `tool_definitions` from `{{sample.tool_definitions}}` |
 | Deterministic result | Copied from the agent run | `score_turn` on Foundry's reply and its tool calls |
 | Agent tokens and latency | In the agent run | Per turn, from the output item |
@@ -875,6 +932,18 @@ last calibration runs, two or three per prompt. The judge, `gpt-4.1-mini`, neede
 score in its answer, or it sometimes scored against its own reasoning; and, for `tool_use`, the instruction to score
 the calls only, with a user's "don't look anything up" meaning no call is needed, or the reply's faults lowered the
 score. The judge varies from run to run, so check a changed prompt over several runs.
+
+Those turns are `data/evaluator-calibration/sample-toolbox.jsonl` (`schemas/evaluator-calibration.schema.json`): each
+case has the evaluators' inputs (`query` with the agent's instructions and the earlier turns, `response` with the
+judged turn's tool calls, results and reply, and `tool_definitions`), the verdict it should get from each evaluator
+(`expect`) and why (`notes`). `python -m evals.calibrate_evaluators` registers the prompts as the runner does, sends the
+cases inline (a `jsonl` data source with `file_content`, mapped as `{{item.query}}`, `{{item.response}}` and
+`{{item.tool_definitions}}`; `expect` and `notes` stay local) to an evaluation named
+`toolbox-eval-calibration-<hash>`, one run per `--repetitions`, and prints each case's expected verdict beside every
+run's, then the mismatches with the judge's score and reason. A verdict the evaluator couldn't give is a mismatch too.
+It exits 0 when every verdict matched, 1 when one didn't, and 2 on a setup or API error or a failed run. With
+`--repetitions 3`, the prompts in the repo matched all 66 verdicts (11 cases, two evaluators, three runs), for 139,067
+judge tokens, about 2,100 a verdict.
 
 The evaluation is named for its settings, `toolbox-eval-<source>-<hash of its definition>`, and later runs with the same
 settings reuse it, so the portal lists them together. The judge makes one call per evaluator and turn; when it shares a
@@ -953,7 +1022,8 @@ root, and `run_assert.py` runs ASSERT from the repo root so it loads the same fi
 | `FOUNDRY_PROJECT_ENDPOINT` | Target, deploy scripts, tool runner (default endpoint) | `https://<resource>.services.ai.azure.com/api/projects/<project>` |
 | `FOUNDRY_TOOLBOX_NAME` | Tool runner, deploy scripts | Toolbox name, default `sample-customer-toolbox` |
 | `FOUNDRY_AGENT_NAME` | Target, `deploy_agent.py`, `run_cloud_eval.py --target` | Agent name, default `customer-assistant` |
-| `FOUNDRY_EVAL_JUDGE_DEPLOYMENT` | `run_cloud_eval.py` | Model deployment that Foundry's evaluators judge with, default `gpt-4-1-mini` |
+| `FOUNDRY_AGENT_VERSION` | Target (agent evals and ASSERT) and `run_cloud_eval.py --target`; `--agent-version` overrides it in both runners | Agent version to call, such as `2` to compare an older version on the same cases; default the agent's latest |
+| `FOUNDRY_EVAL_JUDGE_DEPLOYMENT` | `run_cloud_eval.py`, `calibrate_evaluators.py` | Model deployment that Foundry's evaluators judge with, default `gpt-4-1-mini` |
 | `AZURE_API_BASE`, `ASSERT_AZURE_USE_AAD` | assert-ai | Endpoint and Entra auth for ASSERT's models |
 | `APPLICATIONINSIGHTS_CONNECTION_STRING` | `evals/telemetry.py` | Turns on span export |
 | `APPLICATIONINSIGHTS_USE_AAD` | `evals/telemetry.py` | Entra auth for ingestion |
@@ -1165,7 +1235,8 @@ Deploy steps and current findings: [getting-started.md](getting-started.md) and 
 | Add agent scenarios | A JSONL file under `data/agent-evals/` |
 | Add an ASSERT behavior | A new config in `evals/configs/` (one behavior per config), run with `scripts/run_assert.py` |
 | Judge with other Foundry evaluators | `run_cloud_eval.py --evaluators` with built-in names (without `builtin.`); each set gets its own evaluation, and the report describes evaluators outside `CLOUD_REASONS` in general terms |
-| Add or change one of this repo's evaluators | A judge prompt `evals/evaluators/<name>.md` that uses `{{query}}`, `{{response}}` and `{{tool_definitions}}` and answers with a reason, then a score from 1 to 5; the name and its catalog description in `CUSTOM_EVALUATORS` in `evals/run_cloud_eval.py`, and its meaning in `CLOUD_REASONS`. The next run registers the new version. Check a changed prompt over several runs: the judge varies |
+| Add or change one of this repo's evaluators | A judge prompt `evals/evaluators/<name>.md` that uses `{{query}}`, `{{response}}` and `{{tool_definitions}}` and answers with a reason, then a score from 1 to 5; the name and its catalog description in `CUSTOM_EVALUATORS` in `evals/run_cloud_eval.py`, its meaning in `CLOUD_REASONS`, and its name in the `expect` keys of `schemas/evaluator-calibration.schema.json`. The next run registers the new version. Check a changed prompt with `python -m evals.calibrate_evaluators --repetitions 3`, adding a calibration case for the failure that prompted the change: the judge varies |
+| Check a reply's figures without a judge | `"figures_from_tools": true` on the turn; `scripts/check_figures.py` measures the check on ASSERT transcripts |
 | Add an assertion type | `$defs.assertion` in `schemas/tool-test.schema.json`, `ASSERTION_FIELDS` in `evals/cases.py`, `check()` in `tooltests/run.py`, plus unit tests |
 | Add a failure reason | `Failure("code", message)` in the runner, and the code's meaning in `TOOL_REASONS`, `AGENT_REASONS` or `CLOUD_REASONS` in `evals/reasons.py`; `tests/test_reasons.py` fails on undescribed codes |
 | Add a span attribute | `telemetry.span(...)` calls in the runners; document it in [telemetry.md](telemetry.md) |

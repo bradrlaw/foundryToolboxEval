@@ -50,6 +50,8 @@ AGENT_REASONS = {
     "extra_calls": "The turn made more tool calls than the case's max_tool_calls allows.",
     "response_mismatch": "The reply doesn't match expected_response_pattern.",
     "forbidden_response": "The reply matches response_must_not_match.",
+    "ungrounded_figure": "The reply states a figure that matches no number a tool returned in the conversation "
+                         "(figures_from_tools; evals/figures.py).",
     "latency": "Slower than the case's max_latency_ms.",
     "runner_error": "No reply: the request raised, for example an HTTP error from the Responses API.",
 }

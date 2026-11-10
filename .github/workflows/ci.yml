@@ -55,7 +55,7 @@ jobs:
         run: python -m compileall -q evals tooltests scripts sample-mcp-server tests
 
       - name: Validate eval case files
-        run: python scripts/validate_eval_jsonl.py "data/tool-tests/*.jsonl" "data/agent-evals/*.jsonl"
+        run: python scripts/validate_eval_jsonl.py "data/tool-tests/*.jsonl" "data/agent-evals/*.jsonl" "data/evaluator-calibration/*.jsonl"
 
       - name: Unit tests
         run: python -m unittest discover -s tests

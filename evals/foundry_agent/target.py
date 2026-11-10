@@ -5,6 +5,9 @@ so the ASSERT judge can cite tool names, arguments, and results.
 
 A later turn continues the earlier turn's stored response (previous_response_id), so the agent keeps the tool
 results it already has, as in a real chat. FOUNDRY_AGENT_HISTORY=replay instead sends the conversation as text.
+
+FOUNDRY_AGENT_NAME names the agent (default customer-assistant). Its latest version answers, unless
+FOUNDRY_AGENT_VERSION pins one, such as 2, to compare an older version's instructions on the same cases.
 """
 from __future__ import annotations
 
@@ -36,6 +39,8 @@ PROJECT_ENDPOINT = os.environ.get("FOUNDRY_PROJECT_ENDPOINT", "").rstrip("/")
 if not PROJECT_ENDPOINT:
     raise RuntimeError("Set FOUNDRY_PROJECT_ENDPOINT in .env (see .env.example)")
 AGENT_NAME = os.environ.get("FOUNDRY_AGENT_NAME", "customer-assistant")
+# A version such as "2" pins the agent version that answers; unset, the agent's latest version answers.
+AGENT_VERSION = (os.environ.get("FOUNDRY_AGENT_VERSION") or "").strip() or None
 # chain: a later turn continues the previous turn's stored response. replay: every request carries the conversation
 # as text, without the earlier turns' tool results.
 HISTORY_MODES = ("chain", "replay")
@@ -199,8 +204,8 @@ def run_agent(messages: list[dict[str, str]], previous_response_id: str | None =
         span.set_attribute("gen_ai.agent.name", AGENT_NAME)
         span.set_attribute("input.value", messages[-1]["content"])
         # Every request names the agent, a continued one too: without it the API asks for a model.
-        payload = {"input": [_input_item(m) for m in messages],
-                   "agent_reference": {"type": "agent_reference", "name": AGENT_NAME}}
+        ref = {"type": "agent_reference", "name": AGENT_NAME, **({"version": AGENT_VERSION} if AGENT_VERSION else {})}
+        payload = {"input": [_input_item(m) for m in messages], "agent_reference": ref}
         if previous_response_id:
             payload["previous_response_id"] = previous_response_id
             span.set_attribute("eval.previous_response_id", previous_response_id)

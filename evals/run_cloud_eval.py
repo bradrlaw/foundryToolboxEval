@@ -9,7 +9,8 @@ What it judges:
   conversation). A chained run's later turns are judged with the earlier turns' tool calls and results.
 - --target CASES: Foundry sends the first turn of each conversation to the agent itself and judges the reply, and
   the turn's deterministic checks score the same reply. Later turns are left out: a target run can't continue a
-  conversation.
+  conversation. The agent is --agent at --agent-version, else FOUNDRY_AGENT_NAME at FOUNDRY_AGENT_VERSION, as in the
+  agent-eval runner; without a version Foundry calls the agent's latest.
 
 Each turn gets the evaluators in --evaluators, run with the --judge model deployment. The default is this repo's two
 evaluators and Foundry's built-in intent_resolution:
@@ -313,13 +314,15 @@ def responses_run(name: str, response_ids: list[str], max_turns: int) -> dict:
         "source": {"type": "file_content", "content": [{"item": {"resp_id": i}} for i in response_ids]}}}}
 
 
-def target_run(name: str, turns: list[dict], agent: str) -> dict:
-    """A run in which Foundry sends each turn's user message to the agent and judges the reply."""
+def target_run(name: str, turns: list[dict], agent: str, version: str | None = None) -> dict:
+    """A run in which Foundry sends each turn's user message to the agent, at `version` if given, else its latest,
+    and judges the reply."""
     items = [{"item": {"query": t["user_message"], "case": result_id(t)}} for t in turns]
+    target = {"type": "azure_ai_agent", "name": agent, **({"version": version} if version else {})}
     return {"name": name, "data_source": {
         "type": "azure_ai_target_completions", "source": {"type": "file_content", "content": items},
         "input_messages": {"type": "template", "template": [{"role": "user", "content": "{{item.query}}"}]},
-        "target": {"type": "azure_ai_agent", "name": agent}}}
+        "target": target}}
 
 
 def first_turns(cases: list[dict]) -> tuple[list[dict], list[str]]:
@@ -336,7 +339,7 @@ def _clip(text: str, limit: int = MAX_MESSAGE) -> str:
     return text if len(text) <= limit else text[:limit - 3] + "..."
 
 
-def _error_text(error) -> str | None:
+def error_text(error) -> str | None:
     if not error:
         return None
     if isinstance(error, dict):
@@ -356,7 +359,7 @@ def scores(item: dict) -> dict[str, dict]:
         name = r.get("name") or r.get("metric")
         if not name:
             continue
-        reason = r.get("reason") or _error_text(_dict(r.get("sample")).get("error")) or ""
+        reason = r.get("reason") or error_text(_dict(r.get("sample")).get("error")) or ""
         out[name] = {"status": r.get("status"), "score": r.get("score"), "label": r.get("label"),
                      "threshold": r.get("threshold"), "passed": r.get("passed"), "reason": reason}
     return out
@@ -369,7 +372,7 @@ def verdict(item: dict | None, source: str) -> tuple[str, dict, list[Failure]]:
     if item is None:
         return "not_judged", {}, [Failure("not_judged", "not judged: the evaluation run returned no result for it")]
     found = scores(item)
-    if error := _error_text(_dict(item.get("sample")).get("error")):
+    if error := error_text(_dict(item.get("sample")).get("error")):
         if source == "target":
             return "error", found, [Failure("agent_error", _clip(f"the agent call failed: {error}"))]
         return "not_judged", found, [Failure("not_judged", _clip(f"not judged: {error}"))]
@@ -415,22 +418,32 @@ def judge_responses(turns: list[dict], items: list[dict]) -> list[dict]:
     return out
 
 
+def _parts(messages):
+    """Every content part of a target run's output messages."""
+    for m in messages if isinstance(messages, list) else []:
+        content = _dict(m).get("content")
+        yield from map(_dict, content if isinstance(content, list) else [])
+
+
 def tool_calls(messages) -> list[dict]:
     """The tool calls in a target run's output messages: [{name, arguments}]."""
     calls = []
-    for m in messages if isinstance(messages, list) else []:
-        content = _dict(m).get("content")
-        for c in map(_dict, content if isinstance(content, list) else []):
-            if c.get("type") != "tool_call":
-                continue
-            args = c.get("arguments")
-            if isinstance(args, str):
-                try:
-                    args = json.loads(args)
-                except ValueError:
-                    pass
-            calls.append({"name": str(c.get("name") or ""), "arguments": args if isinstance(args, dict) else {}})
+    for c in _parts(messages):
+        if c.get("type") != "tool_call":
+            continue
+        args = c.get("arguments")
+        if isinstance(args, str):
+            try:
+                args = json.loads(args)
+            except ValueError:
+                pass
+        calls.append({"name": str(c.get("name") or ""), "arguments": args if isinstance(args, dict) else {}})
     return calls
+
+
+def tool_outputs(messages) -> list:
+    """What the tools returned, in a target run's output messages."""
+    return [c.get("tool_result") for c in _parts(messages) if c.get("type") == "tool_result"]
 
 
 def _usage(usage) -> dict | None:
@@ -452,12 +465,13 @@ def judge_target(turns: list[dict], items: list[dict]) -> list[dict]:
     for turn in turns:
         item = by_turn.get(result_id(turn))
         source, sample = _dict((item or {}).get("datasource_item")), _dict((item or {}).get("sample"))
-        calls, text = tool_calls(source.get("sample.output_items")), source.get("sample.output_text") or ""
+        sent, text = source.get("sample.output_items"), source.get("sample.output_text") or ""
+        calls = tool_calls(sent)
         latency = sample.get("latency_ms") if isinstance(sample.get("latency_ms"), (int, float)) else None
         checks = None
-        if item is not None and not _error_text(sample.get("error")):
+        if item is not None and not error_text(sample.get("error")):
             found = score_turn(turn, {"text": text, "tool_calls": calls, "platform_abort": False,
-                                      "abort_reason": None, "latency_ms": latency})
+                                      "abort_reason": None, "latency_ms": latency}, tool_outputs(sent))
             checks = {"passed": not found, "failures": [f.message for f in found], "reasons": [f.reason for f in found]}
         version = source.get("agent_version")
         out.append({"conversation_id": turn["conversation_id"], "turn_number": turn["turn_number"], "repetition": 1,
@@ -551,6 +565,9 @@ def main(argv: list[str] | None = None) -> int:
                          "agent-eval JSONL files or glob patterns")
     ap.add_argument("--agent", help="with --target, the agent to call (default: $FOUNDRY_AGENT_NAME, else "
                                     "customer-assistant)")
+    ap.add_argument("--agent-version", type=at_least_one, metavar="N",
+                    help="with --target, pin the agent version that answers, such as 2 (default: "
+                         "$FOUNDRY_AGENT_VERSION, else the agent's latest version)")
     ap.add_argument("--judge", help="model deployment the evaluators use (default: $FOUNDRY_EVAL_JUDGE_DEPLOYMENT, "
                                     "else gpt-4-1-mini)")
     ap.add_argument("--evaluators", type=evaluator_list, default=DEFAULT_EVALUATORS, metavar="NAMES",
@@ -568,8 +585,9 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
     if args.run and args.target:
         return _setup_error("give an agent run or --target cases, not both")
-    if args.agent and not args.target:
-        return _setup_error("--agent goes with --target: a run's responses are judged as they were recorded")
+    for flag, value in (("--agent", args.agent), ("--agent-version", args.agent_version)):
+        if value and not args.target:
+            return _setup_error(f"{flag} goes with --target: a run's responses are judged as they were recorded")
     if args.max_turns and args.target:
         return _setup_error("--max-turns goes with an agent run: --target judges first turns only")
 
@@ -621,11 +639,13 @@ def main(argv: list[str] | None = None) -> int:
               + (f"; {unstored} turns have no stored response" if unstored else ""))
     else:
         source, agent = "target", args.agent or os.environ.get("FOUNDRY_AGENT_NAME") or DEFAULT_AGENT
+        version = str(args.agent_version or "") or (os.environ.get("FOUNDRY_AGENT_VERSION") or "").strip() or None
+        label = f"{agent} version {version}" if version else agent
         turns, left_out = first_turns(cases)
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        body = target_run(f"{agent} first turns {stamp}", turns, agent)
+        body = target_run(f"{label} first turns {stamp}", turns, agent, version)
         where = {"cases": [str(c) for c in args.target], "left_out": left_out}
-        print(f"Foundry sends the first turn of {len(turns)} conversations to agent {agent}"
+        print(f"Foundry sends the first turn of {len(turns)} conversations to agent {label}"
               + (f"; later turns left out: {len(left_out)}" if left_out else ""))
     print(f"Evaluators: {', '.join(args.evaluators)} (judge {judge})")
 
@@ -647,7 +667,7 @@ def main(argv: list[str] | None = None) -> int:
             return _setup_error(f"the evaluation run is still {run.get('status')} after {args.timeout} minutes and "
                                 f"goes on in Foundry (evaluation {eval_id}, run {run_id})")
         if run.get("status") != "completed":
-            why = _error_text(run.get("error")) or "no error given"
+            why = error_text(run.get("error")) or "no error given"
             return _setup_error(f"the evaluation run {run.get('status')} (evaluation {eval_id}, run {run_id}): {why}")
         items = api.output_items(eval_id, run_id)
         if source == "responses":

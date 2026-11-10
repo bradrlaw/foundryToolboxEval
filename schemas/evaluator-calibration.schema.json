@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Evaluator calibration case",
+  "description": "One JSON object per line of a data/evaluator-calibration/*.jsonl file: a turn as this repo's Foundry evaluators see it, with the verdict each should give. evals/calibrate_evaluators.py has the evaluators judge every case and lists the verdicts that differ. Messages use the shape of a stored response's history: content parts such as input_text, output_text, tool_call and tool_result. Validate with scripts/validate_eval_jsonl.py.",
+  "type": "object",
+  "required": ["case", "expect", "query", "response", "tool_definitions"],
+  "properties": {
+    "case": {"type": "string", "minLength": 1, "description": "The case's id, unique across the files."},
+    "expect": {
+      "type": "object",
+      "minProperties": 1,
+      "propertyNames": {"enum": ["tool_use", "grounded_adherence"]},
+      "additionalProperties": {"enum": ["pass", "fail"]},
+      "description": "The verdict each of this repo's evaluators should give. Evaluators not listed aren't checked on this case."
+    },
+    "notes": {"type": "string", "description": "What the case tests and why it should get its verdicts."},
+    "query": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"$ref": "#/$defs/message"},
+      "description": "What the evaluators see before the judged turn: the agent's instructions as a system message, the earlier turns with their tool calls and results, then the user's message."
+    },
+    "response": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"$ref": "#/$defs/message"},
+      "description": "The judged turn: its tool calls and results, then the reply."
+    },
+    "tool_definitions": {"type": "array", "items": {"type": "object"}, "description": "The tools the agent had."}
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "message": {
+      "type": "object",
+      "required": ["role", "content"],
+      "properties": {
+        "role": {"enum": ["system", "user", "assistant", "tool"]},
+        "content": {"anyOf": [{"type": "string"}, {"type": "array", "items": {"type": "object"}}]}
+      }
+    }
+  }
+}

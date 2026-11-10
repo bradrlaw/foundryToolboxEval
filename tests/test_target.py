@@ -234,6 +234,7 @@ class RunAgentTests(unittest.TestCase):
         provider = TracerProvider()
         provider.add_span_processor(SimpleSpanProcessor(exporter))
         with mock.patch.object(target, "_tracer", provider.get_tracer("test")), \
+                mock.patch.object(target, "AGENT_VERSION", None), \
                 mock.patch.object(target, "_post_responses", return_value=(data, 50.0, 1, 50.0)) as post:
             target.run_agent([{"role": "user", "content": "and the price?"}], "resp_1")
         self.assertEqual(post.call_args.args[0], {
@@ -242,6 +243,14 @@ class RunAgentTests(unittest.TestCase):
         (span,) = exporter.get_finished_spans()
         self.assertEqual((span.attributes["eval.previous_response_id"], span.attributes["gen_ai.response.id"]),
                          ("resp_1", "resp_2"))
+
+    def test_a_pinned_version_is_named_in_the_agent_reference(self):
+        data = {"id": "resp_1", "status": "completed", "output": []}
+        with mock.patch.object(target, "AGENT_VERSION", "2"), \
+                mock.patch.object(target, "_post_responses", return_value=(data, 50.0, 1, 50.0)) as post:
+            target.run_agent([{"role": "user", "content": "hi"}])
+        self.assertEqual(post.call_args.args[0]["agent_reference"],
+                         {"type": "agent_reference", "name": target.AGENT_NAME, "version": "2"})
 
     def test_an_earlier_reply_is_sent_as_output_text_so_foundry_evaluators_accept_it(self):
         data = {"id": "resp_2", "status": "completed", "output": []}

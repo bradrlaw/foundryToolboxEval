@@ -132,7 +132,7 @@ With the grounding rules:
   relabeled manufacturing figures, and one converts a contract value at the user's planning rate. The one
   `tool_error_handling` violation claims a cross-exchange ticker search that no tool call made. Neither round of rules
   moved these cases; the next levers are a stronger model, or a check of each figure in a reply against the tool results
-  before the user sees it.
+  before the user sees it ([both tried on new cases](#on-a-fresh-test-set)).
 - From v3 the agent often words an access denial as a missing app role rather than "not authorized", so the Entra
   suite's denial turns accept any mention of a permission or role.
 - **Chaining the turns changed nothing measurable here.** Rerun with each later turn continuing the stored response
@@ -141,6 +141,46 @@ With the grounding rules:
   chaining can't affect, so it is run-to-run variation. These violations follow the user's word, not a lost tool
   result; chaining matters when an answer depends on an earlier tool result, as in the agent evals' `c-recall`, where
   the replayed agent made up a contract value in 2 of 4 runs and the chained one quoted the record in 4 of 4.
+
+### On a fresh test set
+
+v3's and v4's rules were written against the cases above, so both behaviors ran again in November 2026 on new cases:
+holdout suites that keep the development suites' behavior categories (their `artifacts\systematize` folder copied in)
+with a newly generated test set, none of whose cases repeat a development case
+(`run_assert.py <config> --override suite=<suite>-holdout`). They ran against v2 and v4, pinned with
+`FOUNDRY_AGENT_VERSION`, and against `customer-assistant-gpt-6-astra`, which has v4's instructions and toolbox on the
+stronger `gpt-6-astra` ([Agent](#agent)). Each run was judged once. Cases violated:
+
+| Behavior | Cases | Dimension | v2 | v4 | v4's instructions on `gpt-6-astra` |
+| --- | ---: | --- | ---: | ---: | ---: |
+| `ungrounded_figures` | 36 | `figure_grounding` | 14 | 9 | 0 |
+| `ungrounded_figures` | 36 | `overrefusal` | 11 | 9 | 1 |
+| `ungrounded_figures` | 36 | `policy_violation` | 14 | 10 | 1 |
+| `tool_error_handling` | 18 | `graceful_error` | 6 | 2 | 0 |
+| `tool_error_handling` | 18 | `policy_violation` | 7 | 4 | 0 |
+
+The judge timed out on one `ungrounded_figures` case of the `gpt-6-astra` run, which has 35 scored cases; v2 and v4
+passed that case.
+
+- **The rules carried over, more weakly.** On the new cases v4 cleared 5 of v2's 14 `figure_grounding` violations and
+  added none (p = 0.06, against 0.03 on the development cases), and 4 of v2's 6 `graceful_error` violations
+  (p = 0.125). Its 9 `figure_grounding` violations again follow the user: it keeps a figure the user supplied (a VP's
+  draft contract value, Finance's share price for a private company), estimates a share price the quote tool doesn't
+  have, or gives aerospace a growth rate from general knowledge or from manufacturing's data. All its tool-error
+  violations are in multi-turn scenarios: internal names leaked in follow-ups, a claim that the lookup covered inactive
+  accounts, and a manufacturing proxy given for an unsupported industry without saying so. The new cases were harder
+  for v2 too: 6 `graceful_error` violations of 18, against 2 on the development cases.
+- **The stronger model removed nearly all of them.** With the same instructions, `gpt-6-astra` violated
+  `figure_grounding` in none of its 35 scored cases, against 9 for v4 (p = 0.004), and had no tool-error violation
+  (v4: 4 cases with `policy_violation`, p = 0.125). It rejected each figure the user pressed on it, by name: "not the
+  unverified $1.8 million in your notes". Its one violating case went the other way: it declined a clearly labeled
+  hypothetical worked example (`overrefusal` and `policy_violation`). It used 17 to 19% more tokens than v4, and like
+  v4 it passed the deterministic agent evals, figure check included, in 36 of 36 runs with `--repetitions 3`.
+- **The figure check** (`figures_from_tools`, [architecture](../docs/architecture.md#the-figure-check)), its rules
+  frozen from the development runs, flagged 11 of v2's 14 and 8 of v4's 9 `figure_grounding` violations. It also
+  flagged 18 to 26% of the transcripts the judge passed, most often for a user's figure repeated to reject it, which
+  the stronger model does often. So it suits turns that should only relay tool data, as in the agent evals; telling
+  adopting a user's figure from rejecting it still takes the judge.
 
 ## Foundry evaluator findings
 
@@ -173,7 +213,8 @@ deterministic checks passed every turn below:
 - **The judge prompts needed calibrating.** On 11 synthetic turns with an expected verdict each
   ([architecture](../docs/architecture.md#8-foundry-evaluators)), early versions let a wrong reply lower `tool_use`'s
   score for correct calls, and, with the score before the reason in the judge's answer, the judge sometimes gave a
-  score its own reason contradicted: 2, with the reason "the score should be 5".
+  score its own reason contradicted: 2, with the reason "the score should be 5". The prompts in the repo give every
+  expected verdict: 66 of 66 over 3 runs of `python -m evals.calibrate_evaluators --repetitions 3`.
 - **Text history needed `output_text`.** A replayed run's later turns couldn't be judged at all: every evaluator
   rejected "content type 'input_text' for message with role 'assistant'", how Foundry stores a plain-string reply.
   The agent target (`evals\foundry_agent\target.py`) now sends earlier replies as `output_text`, so a replayed run's
@@ -186,8 +227,14 @@ Prompt agent `customer-assistant` (model `gpt-4-1-mini`) with the toolbox endpoi
 Its instructions (`INSTRUCTIONS` in `scripts\deploy_agent.py`) allow only figures a tool returned, treat figures the user
 gives as unverified, and say how to report a tool error; each rule answers an [ASSERT finding](#assert-findings).
 Create a new version with `.\.venv\Scripts\python scripts\deploy_agent.py [--model <deployment>] [--dry-run]`.
-Invoke: `POST {project}/openai/v1/responses` with `agent_reference`. The reference names no version, so every run gets the
-latest one.
+Invoke: `POST {project}/openai/v1/responses` with `agent_reference`. The reference names a version only when
+`FOUNDRY_AGENT_VERSION` (or the agent runner's `--agent-version`) sets one; otherwise every run gets the latest. A
+cloud-eval `--target` run gives Foundry's agent target the same version.
+
+For the model comparison in the [ASSERT findings](#assert-findings), `customer-assistant-gpt-6-astra` has v4's
+instructions and toolbox on the stronger `gpt-6-astra`:
+`.\.venv\Scripts\python scripts\deploy_agent.py --agent customer-assistant-gpt-6-astra --model gpt-6-astra`. Point a run
+at it with `--agent` or `FOUNDRY_AGENT_NAME`.
 
 ## Redeploy
 

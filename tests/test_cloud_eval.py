@@ -60,13 +60,14 @@ def item(*results, error=None, **source):
 
 
 def messages(text, *calls):
-    """A target run's output messages: the agent's tool calls with their results, then its answer."""
+    """A target run's output messages: the agent's tool calls with their results, then its answer. A call is (name,
+    arguments) or (name, arguments, result)."""
     out = [{"role": "system", "content": "You are an assistant."}]
-    for i, (name, args) in enumerate(calls):
+    for i, (name, args, *result) in enumerate(calls):
         out += [{"role": "assistant", "content": [{"type": "tool_call", "tool_call_id": f"call_{i}", "name": name,
                                                    "arguments": args}]},
                 {"role": "tool", "tool_call_id": f"call_{i}",
-                 "content": [{"type": "tool_result", "tool_result": '{"ok": true}'}]}]
+                 "content": [{"type": "tool_result", "tool_result": result[0] if result else '{"ok": true}'}]}]
     return out + [{"role": "assistant", "content": [{"type": "output_text", "text": text}]}]
 
 
@@ -286,6 +287,8 @@ class BuilderTests(unittest.TestCase):
                          [{"item": {"query": "Look up customer C1.", "case": "lookup#1"}},
                           {"item": {"query": "Who am I?", "case": "who#1"}}])
         self.assertEqual(source["target"], {"type": "azure_ai_agent", "name": "my-agent"})
+        self.assertEqual(cloud.target_run("n", firsts, "my-agent", "2")["data_source"]["target"],
+                         {"type": "azure_ai_agent", "name": "my-agent", "version": "2"})
 
 
 class VerdictTests(unittest.TestCase):
@@ -355,6 +358,13 @@ class JudgeTests(unittest.TestCase):
         self.assertEqual([out[2]["deterministic"], out[3]["deterministic"]], [None, None])
         self.assertEqual(out[2]["reasons"], ["agent_error"])
 
+    def test_target_figures_are_checked_against_what_the_tools_returned(self):
+        sent = answered("lookup#1", "C1 is Contoso, worth $1.25 million, up 4%.",
+                        ("sample___get_customer", {"customer_id": "C1"}, '{"acv": 1250000}'))
+        out = cloud.judge_target([{**LOOKUP, "figures_from_tools": True}], [sent])
+        self.assertEqual(out[0]["deterministic"]["failures"], ["figures no tool returned in the conversation: 4%"])
+        self.assertEqual(out[0]["tool_calls"], [{"name": "sample___get_customer", "arguments": {"customer_id": "C1"}}])
+
     def test_tool_call_arguments_sent_as_text_are_parsed(self):
         sent = [{"role": "assistant", "content": [{"type": "tool_call", "name": "t", "arguments": '{"a": 1}'},
                                                   {"type": "tool_call", "name": "u", "arguments": "not json"}]}]
@@ -393,7 +403,7 @@ class MainTests(unittest.TestCase):
             p = mock.patch.object(cloud.EvalsAPI, name)
             self.api[name] = p.start()
             self.addCleanup(p.stop)
-        for name in ("FOUNDRY_EVAL_JUDGE_DEPLOYMENT", "FOUNDRY_AGENT_NAME", "GITHUB_ACTIONS"):
+        for name in ("FOUNDRY_EVAL_JUDGE_DEPLOYMENT", "FOUNDRY_AGENT_NAME", "FOUNDRY_AGENT_VERSION", "GITHUB_ACTIONS"):
             os.environ.pop(name, None)  # restored with the rest of the environment
         # tool_use's prompt changed since its version 6; grounded_adherence's is version 4.
         self.api["catalog_version"].side_effect = lambda entry: (
@@ -494,12 +504,32 @@ class MainTests(unittest.TestCase):
         self.assertEqual(saved["provenance"]["agent"], {"name": "my-agent", "version": "4", "model": "gpt-4-1-mini"})
         self.assertEqual([r["deterministic"]["passed"] for r in saved["results"]], [True, True])
 
+    def test_target_mode_pins_the_agent_version_from_the_flag_else_the_environment(self):
+        cases = self.dir / "cases.jsonl"
+        cases.write_text(json.dumps(LOOKUP) + "\n", encoding="utf-8")
+        self.api["output_items"].return_value = [
+            answered("lookup#1", "C1 is Contoso.", ("sample___get_customer", {"customer_id": "C1"}))]
+        for n, (argv, env, expected) in enumerate((([], None, None), ([], " 2 ", "2"),
+                                                   (["--agent-version", "3"], "2", "3"))):
+            with self.subTest(argv=argv, env=env):
+                os.environ.pop("FOUNDRY_AGENT_VERSION", None)
+                if env:
+                    os.environ["FOUNDRY_AGENT_VERSION"] = env
+                code, _, out, _ = self.main("--target", str(cases), *argv, out=f"out{n}")
+                self.assertEqual(code, 0)
+                body = self.api["start"].call_args.args[1]
+                self.assertEqual(body["data_source"]["target"].get("version"), expected)
+                label = f"customer-assistant version {expected}" if expected else "customer-assistant"
+                self.assertTrue(body["name"].startswith(f"{label} first turns "))
+                self.assertIn(f"conversations to agent {label}\n", out)
+
     def test_setup_errors_exit_2_before_the_evaluation_starts(self):
         not_agent = self.dir / "cloud-run.json"
         not_agent.write_text(json.dumps({"kind": "cloud", "results": []}), encoding="utf-8")
         for argv, expected in (
                 (["x.json", "--target", "y.jsonl"], "not both"),
                 (["--agent", "a"], "--agent goes with --target"),
+                (["--agent-version", "2"], "--agent-version goes with --target"),
                 (["--target", "y.jsonl", "--max-turns", "2"], "--max-turns goes with an agent run"),
                 ([], "no runs in"),
                 ([str(not_agent)], "is not an agent-eval run")):
