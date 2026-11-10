@@ -89,8 +89,9 @@ az role assignment create --assignee-object-id $principal --assignee-principal-t
   --role "Foundry User" --scope $account
 ```
 
-Foundry User (formerly Azure AI User) covers the toolbox calls, the agent requests, the version reads for provenance and
-the evaluation runs. It goes on the Foundry resource because Foundry's evaluators call the judge deployment as the
+Foundry User (formerly Azure AI User) covers the toolbox calls, the agent requests, the version reads for provenance,
+registering this repo's evaluators in the project's evaluator catalog (the first live run did) and the evaluation runs.
+It goes on the Foundry resource because Foundry's evaluators call the judge deployment as the
 identity, and model inference needs the role on the resource: with it on the project only, every judge call fails with
 `PermissionDenied` ([Learn](https://learn.microsoft.com/azure/foundry/observability/how-to/evaluation-permissions)).
 Without the evaluators step, the project is enough (`--scope "$account/projects/<project>"`). The narrower built-in

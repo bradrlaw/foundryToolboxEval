@@ -880,7 +880,8 @@ The evaluation is named for its settings, `toolbox-eval-<source>-<hash of its de
 settings reuse it, so the portal lists them together. The judge makes one call per evaluator and turn; when it shares a
 model deployment with the agent, the two share its rate limit, so run one job at a time. Foundry makes those calls as
 the caller, who needs Foundry User on the Foundry resource: with the role on the project only, each call fails with
-`PermissionDenied` and every turn is an `error`. Each turn gets the first of these verdicts that applies:
+`PermissionDenied` and every turn is an `error`. The same role covers registering this repo's evaluators. Each turn
+gets the first of these verdicts that applies:
 
 1. `not_judged`: the turn has no stored response, the run returned no output item for it, or the service couldn't read
    its stored response.
