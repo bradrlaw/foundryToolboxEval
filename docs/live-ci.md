@@ -96,7 +96,8 @@ identity, and model inference needs the role on the resource: with it on the pro
 Without the evaluators step, the project is enough (`--scope "$account/projects/<project>"`). The narrower built-in
 roles, Foundry Agent Consumer and Foundry Project Runtime User, grant only agent-invocation data actions. Foundry User
 also lets the identity read the secrets of the connections of every project in the resource, which is one reason only
-`main` can use the `live` environment. A new role assignment can take a few minutes to apply.
+`main` can use the `live` environment. A new role assignment can take a few minutes to apply, and the judge calls took
+longer: an hour after the role went on the resource, 7 of 34 judge calls still failed; after two hours, none did.
 
 ### Create the environment and its secrets
 
@@ -158,6 +159,7 @@ A public repository's logs and job summaries are public.
 | `AADSTS700024: Client assertion is not within its valid time range` | A token for a new audience was requested after GitHub's ID token expired. Get it right after signing in, as the workflow does for `https://ai.azure.com` |
 | HTTP 401 or 403 from Foundry | The role assignment hasn't applied yet, or it is on another project |
 | Every turn of the Foundry evaluators errors with `PermissionDenied`: the principal lacks `Microsoft.CognitiveServices/accounts/OpenAI/deployments/chat/completions/action` | The identity has Foundry User on the project only. The evaluators call the judge deployment as the identity, which needs the role on the Foundry resource (section 3) |
+| Some turns of the Foundry evaluators error with `Principal does not have access to API/Operation`, fewer on each run | The role on the Foundry resource hasn't reached every judge call yet, which took up to two hours (section 3). Re-run the workflow later |
 | `Branch "<name>" is not allowed to deploy to live due to environment protection rules` | The run is not on `main` |
 | Sign-in can't select the subscription | `AZURE_SUBSCRIPTION_ID` isn't the project's subscription |
 | The Foundry evaluators step is skipped | The agent evals recorded no run, after a setup error; see their step's log |
