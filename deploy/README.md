@@ -9,7 +9,7 @@ Real values for this deployment are kept in the git-ignored `deploy/resources.lo
 | Project connection | `sample-mcp-conn` (category `RemoteTool`, auth `None`) |
 | Toolbox | `sample-customer-toolbox` (v1, default) |
 | Consumer endpoint | `{project_endpoint}/toolboxes/sample-customer-toolbox/mcp?api-version=v1` |
-| CI identity | User-assigned managed identity `id-toolbox-eval-ci` in `<sample-rg>`: Foundry User on the project, and a federated credential for the repository's `live` environment ([docs/live-ci.md](../docs/live-ci.md)) |
+| CI identity | User-assigned managed identity `id-toolbox-eval-ci` in `<sample-rg>`: Foundry User on the Foundry resource, which Foundry's evaluators need to call the judge as the identity, and on the project; a federated credential for the repository's `live` environment ([docs/live-ci.md](../docs/live-ci.md)) |
 
 The host is unauthenticated (synthetic data only). Calls to the toolbox need a bearer token for `https://ai.azure.com/.default`
 (`az account get-access-token --resource https://ai.azure.com`).

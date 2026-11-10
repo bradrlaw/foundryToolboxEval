@@ -65,8 +65,11 @@ jobs:
 
       - name: Get the Foundry token
         # az can't sign in again once GitHub's OIDC token expires, minutes from now. It caches this access token,
-        # which outlasts the job, for the runners.
-        run: az account get-access-token --scope https://ai.azure.com/.default --output none
+        # which outlasts the job, for the runners. Permission errors name the identity's object ID, so mask that too.
+        run: |
+          az account get-access-token --scope https://ai.azure.com/.default --output none
+          oid=$(python -c "from evals.auth import caller_claims; print(caller_claims()['oid'])")
+          echo "::add-mask::$oid"
 
       - name: Tool tests
         id: tools

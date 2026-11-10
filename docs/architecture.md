@@ -811,7 +811,7 @@ sequenceDiagram
     R->>E: POST /evals/{id}/runs: the response ids, or the first turns and the agent
     par Foundry runs the evaluation
         E->>A: read each stored response, or send each first turn
-        E->>J: one call per evaluator and turn
+        E->>J: one call per evaluator and turn, as the caller
     and the runner waits
         loop until completed, failed or canceled, at most --timeout
             R->>E: GET /evals/{id}/runs/{run}
@@ -841,8 +841,9 @@ deployment, else `FOUNDRY_EVAL_JUDGE_DEPLOYMENT`, else `gpt-4-1-mini`. The defau
 
 The evaluation is named for its settings, `toolbox-eval-<source>-<hash of its definition>`, and later runs with the same
 settings reuse it, so the portal lists them together. The judge makes one call per evaluator and turn; when it shares a
-model deployment with the agent, the two share its rate limit, so run one job at a time. Each turn gets the first of
-these verdicts that applies:
+model deployment with the agent, the two share its rate limit, so run one job at a time. Foundry makes those calls as
+the caller, who needs Foundry User on the Foundry resource: with the role on the project only, each call fails with
+`PermissionDenied` and every turn is an `error`. Each turn gets the first of these verdicts that applies:
 
 1. `not_judged`: the turn has no stored response, the run returned no output item for it, or the service couldn't read
    its stored response.

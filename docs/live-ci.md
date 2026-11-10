@@ -10,7 +10,7 @@ offline checks stay in `ci.yml` ([README](../README.md#unit-tests-and-ci)).
 | Item | Value |
 | --- | --- |
 | Triggers | `schedule` (daily, 12:00 UTC) and `workflow_dispatch`; one run at a time |
-| Identity | A user-assigned managed identity with **Foundry User** on the project, trusted through a federated credential for the `live` environment |
+| Identity | A user-assigned managed identity with **Foundry User** on the Foundry resource, which the evaluators' judge calls need (the rest needs it on the project only), trusted through a federated credential for the `live` environment |
 | Suites | `data/tool-tests/sample-toolbox.jsonl` (14 cases) against `sample-customer-toolbox`, then `data/agent-evals/sample-toolbox.jsonl` (12 turns) against `customer-assistant`. The agent evals run even if the tool tests fail. Then, if the agent evals recorded a run, Foundry's evaluators judge its replies by their stored response IDs, so the agent isn't called again (`evals/run_cloud_eval.py --fail-on unjudged --timeout 15`) |
 | Output | The tool, agent and cloud reports from `scripts/report.py`, in the job summary. Result files stay on the runner |
 | Telemetry | Spans go to App Insights with `cloud_RoleInstance` set to `github-actions-<run id>` ([telemetry.md](telemetry.md#2-configure)) |
@@ -60,7 +60,7 @@ gets the Foundry token right after signing in; `az` caches it, and it lasts abou
 
 ## 3. Set it up
 
-You need rights to create a managed identity in a resource group and to assign roles on the Foundry project (Owner, or
+You need rights to create a managed identity in a resource group and to assign roles on the Foundry resource (Owner, or
 Contributor plus Role Based Access Control Administrator), and admin rights on the repository. The commands are
 PowerShell; replace the values in angle brackets.
 
@@ -78,21 +78,24 @@ the subject `<prefix>:environment:live`, and the federated credential must match
 
 ```powershell
 $rg = "<resource-group>"   # where the identity lives, for example the sample's
-# <resource> and <project> as in FOUNDRY_PROJECT_ENDPOINT: https://<resource>.services.ai.azure.com/api/projects/<project>
+# <resource> as in FOUNDRY_PROJECT_ENDPOINT: https://<resource>.services.ai.azure.com/api/projects/<project>
 $account = az resource list --resource-type Microsoft.CognitiveServices/accounts --query "[?name=='<resource>'].id" -o tsv
-$project = "$account/projects/<project>"
 az identity create -n id-toolbox-eval-ci -g $rg
 az identity federated-credential create --name github-live --identity-name id-toolbox-eval-ci -g $rg `
   --issuer https://token.actions.githubusercontent.com --audiences api://AzureADTokenExchange `
   --subject "<prefix>:environment:live"
 $principal = az identity show -n id-toolbox-eval-ci -g $rg --query principalId -o tsv
 az role assignment create --assignee-object-id $principal --assignee-principal-type ServicePrincipal `
-  --role "Foundry User" --scope $project
+  --role "Foundry User" --scope $account
 ```
 
-Foundry User (formerly Azure AI User) covers the toolbox calls, the agent requests and the version reads for provenance.
-The narrower built-in roles, Foundry Agent Consumer and Foundry Project Runtime User, grant only agent-invocation data
-actions. Foundry User also lets the identity read the secrets of the project's connections, which is one reason only
+Foundry User (formerly Azure AI User) covers the toolbox calls, the agent requests, the version reads for provenance and
+the evaluation runs. It goes on the Foundry resource because Foundry's evaluators call the judge deployment as the
+identity, and model inference needs the role on the resource: with it on the project only, every judge call fails with
+`PermissionDenied` ([Learn](https://learn.microsoft.com/azure/foundry/observability/how-to/evaluation-permissions)).
+Without the evaluators step, the project is enough (`--scope "$account/projects/<project>"`). The narrower built-in
+roles, Foundry Agent Consumer and Foundry Project Runtime User, grant only agent-invocation data actions. Foundry User
+also lets the identity read the secrets of the connections of every project in the resource, which is one reason only
 `main` can use the `live` environment. A new role assignment can take a few minutes to apply.
 
 ### Create the environment and its secrets
@@ -126,7 +129,7 @@ The run's summary page shows the three reports. Once `live.yml` is on `main`, th
 A public repository's logs and job summaries are public.
 
 - GitHub masks every secret's value in logs and summaries. The workflow also masks the resource and project names, which
-  can appear without the rest of the endpoint.
+  can appear without the rest of the endpoint, and the identity's object ID, which permission errors name.
 - Result files never leave the runner: they hold the endpoint, and GitHub doesn't mask artifacts. The reports hold no
   endpoint: they name the agent, model, toolbox, versions and commit, and list case IDs, failure messages and timings.
   The cloud report adds the judge deployment, the evaluation's name and run ID, and the judge's reasons. In GitHub
@@ -154,6 +157,7 @@ A public repository's logs and job summaries are public.
 | `AADSTS700016: Application with identifier ... was not found` | `AZURE_CLIENT_ID` isn't the identity's client ID; its principal ID is a different value |
 | `AADSTS700024: Client assertion is not within its valid time range` | A token for a new audience was requested after GitHub's ID token expired. Get it right after signing in, as the workflow does for `https://ai.azure.com` |
 | HTTP 401 or 403 from Foundry | The role assignment hasn't applied yet, or it is on another project |
+| Every turn of the Foundry evaluators errors with `PermissionDenied`: the principal lacks `Microsoft.CognitiveServices/accounts/OpenAI/deployments/chat/completions/action` | The identity has Foundry User on the project only. The evaluators call the judge deployment as the identity, which needs the role on the Foundry resource (section 3) |
 | `Branch "<name>" is not allowed to deploy to live due to environment protection rules` | The run is not on `main` |
 | Sign-in can't select the subscription | `AZURE_SUBSCRIPTION_ID` isn't the project's subscription |
 | The Foundry evaluators step is skipped | The agent evals recorded no run, after a setup error; see their step's log |
