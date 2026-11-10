@@ -24,9 +24,12 @@ deterministic result, and the judge's tokens. scripts/report.py cloud reports th
 Usage:
   python -m evals.run_cloud_eval [results/agent-evals/run-<timestamp>.json]
   python -m evals.run_cloud_eval --target data/agent-evals/sample-toolbox.jsonl
+  python -m evals.run_cloud_eval --fail-on unjudged --timeout 15   # as live CI runs it
 
 Exit codes: 0 every turn passed, 1 some failed, errored or weren't judged, 2 setup error, an HTTP error from the
-evaluation API, or the evaluation run failed, was canceled or didn't end within --timeout.
+evaluation API, or the evaluation run failed, was canceled or didn't end within --timeout. With --fail-on unjudged,
+turns the evaluators failed don't count, so 1 means only that some turns couldn't be judged (error or not judged):
+live CI reports the judge's verdicts without failing on them.
 """
 from __future__ import annotations
 
@@ -64,6 +67,7 @@ MAX_ATTEMPTS = 6
 RESEND_STATUSES = {408, 429}
 ENDED = ("completed", "failed", "canceled")
 PASSING = ("pass", "skipped")
+UNJUDGED = ("error", "not_judged")
 LABELS = {"pass": "PASS", "fail": "FAIL", "error": "ERROR", "skipped": "SKIP", "not_judged": "NOT JUDGED"}
 MAX_MESSAGE = 500
 MAX_RESPONSE = 500
@@ -473,6 +477,9 @@ def main(argv: list[str] | None = None) -> int:
                          "(default: the run's longest conversation)")
     ap.add_argument("--timeout", type=at_least_one, default=30, metavar="MINUTES",
                     help="stop waiting for the evaluation run after this long (default 30)")
+    ap.add_argument("--fail-on", choices=("any", "unjudged"), default="any",
+                    help="the turns that make the run exit 1: any that didn't pass (default), or only those the "
+                         "evaluators couldn't judge, so the judge's failures are reported without failing the run")
     ap.add_argument("--out", type=Path, default=ROOT / "results" / "cloud-evals")
     args = ap.parse_args(argv)
     if args.run and args.target:
@@ -571,6 +578,8 @@ def main(argv: list[str] | None = None) -> int:
     print("\n" + "\n".join(summary(results)))
     if line := agreement_line(results):
         print(line)
+    if args.fail_on == "unjudged" and any(r["verdict"] == "fail" for r in results):
+        print("The judge's failures don't fail the run (--fail-on unjudged).")
     used = judge_usage(items)
     if used:
         print(f"Judge tokens: {tokens_text(used)}")
@@ -588,6 +597,8 @@ def main(argv: list[str] | None = None) -> int:
         "result_counts": run.get("result_counts"), "judge_usage": used, "agent_usage": agent_usage,
         "provenance": ran, "report_url": run.get("report_url"), "results": results})
     print(f"results: {out}")
+    if args.fail_on == "unjudged":
+        return 1 if any(r["verdict"] in UNJUDGED for r in results) else 0
     return 0 if all(r["passed"] for r in results) else 1
 
 

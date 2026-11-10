@@ -39,8 +39,9 @@ Checks: expected tool calls (+ param matching), `must_not_call`, response regex 
   and OAuth identity-passthrough toolboxes alike.
 - CI: done. `.github/workflows/ci.yml` runs the offline checks (install, compile, case validation, unit tests) on Ubuntu
   with Python 3.11 and 3.14 and on Windows with 3.14; no Azure access. `live.yml` runs the sample tool tests and agent
-  evals daily against the deployed toolbox and agent, as a managed identity signed in through OIDC, with the reports in
-  the job summary ([live-ci.md](live-ci.md)).
+  evals daily against the deployed toolbox and agent, then has Foundry's evaluators judge the agent's replies, as a
+  managed identity signed in through OIDC, with the reports in the job summary ([live-ci.md](live-ci.md)). The judge's
+  failures are reported without failing the job; turns it couldn't judge fail it.
 - Per-user Entra identity: done ([entra.md](entra.md)). An Entra-protected sample server (`AUTH_MODE=entra`, region
   filtering by app role) behind an OAuth2 identity-passthrough connection; `{{caller.*}}` placeholders; the tool-test
   outcomes `consent_required` and `upstream_error`; and agent abort reasons for turns the agent never ran. `UserEntraToken`
@@ -101,10 +102,8 @@ Checks: expected tool calls (+ param matching), `must_not_call`, response regex 
 
 - Grounding beyond prompting: rerun both ASSERT behaviors on a fresh test set, since v4's rules were written against the
   current one, then try a stronger agent model or a check of each figure in a reply against the tool results.
-- Cloud evaluation follow-ups: a custom evaluator that accepts a correct tool error and grounds a recalled figure in the
-  earlier turns' tool results, so the judge stops failing those turns; then a cloud run in live CI after the agent evals.
-  The CI identity holds **Foundry User** on the project only; Learn says an evaluation that calls a model deployment
-  needs it on the resource.
+- Cloud evaluation follow-up: a custom evaluator that accepts a correct tool error and grounds a recalled figure in the
+  earlier turns' tool results, so the judge stops failing those turns.
 - Identity: several test identities in one run (a role matrix, each case tagged with the identity it expects); the Entra
   suites in live CI, which need a test user who has consented; hosted agents, which forward `x-agent-foundry-call-id` to
   the toolbox; recheck `UserEntraToken` for custom audiences; confirm consent survives the connection's refresh-token

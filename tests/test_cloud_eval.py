@@ -343,12 +343,12 @@ class MainTests(unittest.TestCase):
         path.write_text(json.dumps({"agent": "my-agent", "results": results, **kw}), encoding="utf-8")
         return path
 
-    def main(self, *argv):
-        out, err = io.StringIO(), io.StringIO()
-        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            code = cloud.main([*argv, "--out", str(self.dir / "out")])
-        saved = [json.loads(p.read_text(encoding="utf-8")) for p in (self.dir / "out").glob("run-*.json")]
-        return code, (saved[0] if saved else None), out.getvalue(), err.getvalue()
+    def main(self, *argv, out="out"):
+        stdout, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(err):
+            code = cloud.main([*argv, "--out", str(self.dir / out)])
+        saved = [json.loads(p.read_text(encoding="utf-8")) for p in (self.dir / out).glob("run-*.json")]
+        return code, (saved[0] if saved else None), stdout.getvalue(), err.getvalue()
 
     def test_judges_the_newest_agent_runs_stored_responses(self):
         provenance = {"repo": {"commit": "abc1234", "dirty": False}, "agent": {"name": "my-agent", "version": "4"}}
@@ -376,6 +376,24 @@ class MainTests(unittest.TestCase):
                           "provenance": provenance})
         self.assertEqual([r["verdict"] for r in saved["results"]], ["pass", "fail"])
         self.assertIsNone(saved["agent_usage"])
+
+    def test_fail_on_unjudged_reports_the_judges_failures_but_fails_only_turns_it_could_not_judge(self):
+        self.agent_run([turn(1, "resp_1"), turn(2, "resp_2")])
+        self.api["output_items"].return_value = [item(STRAYS, RESOLVES, response_id="resp_1"),
+                                                 item(ADHERES, RESOLVES, response_id="resp_2")]
+        code, saved, out, _ = self.main("--fail-on", "unjudged")
+        self.assertEqual(code, 0)
+        self.assertEqual([r["verdict"] for r in saved["results"]], ["fail", "pass"])
+        self.assertIn("FAIL c#1 lookup", out)
+        self.assertIn("The judge's failures don't fail the run (--fail-on unjudged).", out)
+        for unjudged, (turns, items) in enumerate((
+                ([turn(1, "resp_1"), turn(2, "resp_2")],
+                 [item(STRAYS, response_id="resp_1"), item(ADHERES, NO_DEFINITIONS, response_id="resp_2")]),
+                ([turn(1, "resp_1"), turn(2, None, passed=False)], [item(STRAYS, response_id="resp_1")]))):
+            with self.subTest(["error", "not_judged"][unjudged]):
+                self.agent_run(turns)
+                self.api["output_items"].return_value = items
+                self.assertEqual(self.main("--fail-on", "unjudged", out=f"out{unjudged}")[0], 1)
 
     def test_target_mode_has_foundry_call_the_agent_with_first_turns(self):
         cases = self.dir / "cases.jsonl"

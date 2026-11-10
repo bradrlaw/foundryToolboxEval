@@ -88,8 +88,9 @@ If a toolbox connection uses OAuth2 identity passthrough, the MCP server sees th
 ## 7. Live runs in CI
 
 To run your suites daily in GitHub Actions as a managed identity, follow [live-ci.md](live-ci.md), then change the case
-files in `live.yml` and add `FOUNDRY_TOOLBOX_NAME` and `FOUNDRY_AGENT_NAME` to its `env`. Suites that need a signed-in
-user (identity passthrough, `{{caller.*}}`) can't run there.
+files in `live.yml` and add `FOUNDRY_TOOLBOX_NAME` and `FOUNDRY_AGENT_NAME` to its `env`, plus
+`FOUNDRY_EVAL_JUDGE_DEPLOYMENT` if your evaluator judge isn't `gpt-4-1-mini`. Suites that need a signed-in user
+(identity passthrough, `{{caller.*}}`) can't run there.
 
 ## Caveats
 

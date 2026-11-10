@@ -1,7 +1,7 @@
-# Live runs against the deployed toolbox and agent: the tool tests and the deterministic agent evals, daily and on
-# demand. Signs in to Azure as a user-assigned managed identity through OIDC, so no Azure credential is stored here.
-# Setup and notes: docs/live-ci.md. Result files stay on the runner, because they name the endpoint; the reports go to
-# the job summary.
+# Live runs against the deployed toolbox and agent, daily and on demand: the tool tests and the deterministic agent
+# evals, then Foundry's evaluators judge the agent's replies. Signs in to Azure as a user-assigned managed identity
+# through OIDC, so no Azure credential is stored here. Setup and notes: docs/live-ci.md. Result files stay on the runner,
+# because they name the endpoint; the reports go to the job summary.
 name: Live
 
 on:
@@ -19,7 +19,7 @@ concurrency:
 
 jobs:
   live:
-    name: Tool tests and agent evals
+    name: Tool tests, agent evals and Foundry evaluators
     runs-on: ubuntu-latest
     environment: live   # holds the secrets; only main can use it
     timeout-minutes: 30
@@ -78,19 +78,31 @@ jobs:
         continue-on-error: true
         run: python -m evals.run_agent_evals data/agent-evals/sample-toolbox.jsonl
 
+      - name: Foundry evaluators
+        id: cloud
+        # Judge the agent evals' stored replies. The judge's failures go to the report without failing the job; turns
+        # it couldn't judge fail it.
+        if: ${{ !cancelled() && hashFiles('results/agent-evals/run-*.json') != '' }}
+        continue-on-error: true
+        run: python -m evals.run_cloud_eval --fail-on unjudged --timeout 15
+
       - name: Reports to the job summary
         if: ${{ !cancelled() }}
         run: |
-          for kind in tool agent; do
+          for kind in tool agent cloud; do
             python scripts/report.py "$kind" >> "$GITHUB_STEP_SUMMARY" ||
               echo "No $kind report: the run recorded no results; see its step's log." >> "$GITHUB_STEP_SUMMARY"
           done
 
       - name: Fail if a run failed
-        if: ${{ steps.tools.outcome != 'success' || steps.agent.outcome != 'success' }}
+        if: >-
+          steps.tools.outcome != 'success' || steps.agent.outcome != 'success' ||
+          steps.cloud.outcome == 'failure'
         env:
           TOOLS: ${{ steps.tools.outcome }}
           AGENT: ${{ steps.agent.outcome }}
+          CLOUD: ${{ steps.cloud.outcome }}
         run: |
-          echo "::error::Tool tests: $TOOLS, agent evals: $AGENT. Exit code 1 means failed cases, 2 a setup error."
+          echo "::error::Tool tests: $TOOLS, agent evals: $AGENT, Foundry evaluators: $CLOUD. Exit code 1 means" \
+            "failed cases (for the evaluators, turns they couldn't judge), 2 a setup error."
           exit 1

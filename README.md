@@ -179,8 +179,10 @@ evaluator's score, threshold and reason beside the same turn's deterministic res
 where the judge and the checks agree. The runner reuses one evaluation per set of settings
 (`toolbox-eval-<source>-<hash>`), waits up to `--timeout` minutes (default 30) for the run, prints its portal link
 (except in GitHub Actions) and writes `results\cloud-evals\run-*.json`. It exits 0 when every turn passed, 1 when one
-didn't, and 2 on a setup or API error or when the evaluation run failed, was canceled or ran out of time. When the judge
-and the agent share a model deployment they share its rate limit, so run one job at a time.
+didn't, and 2 on a setup or API error or when the evaluation run failed, was canceled or ran out of time. With
+`--fail-on unjudged` it exits 1 only when a turn wasn't judged (`error` or `not_judged`): the judge's failures are
+reported but don't fail the run, as in live CI. When the judge and the agent share a model deployment they share its
+rate limit, so run one job at a time.
 
 Findings ([deploy/README.md](deploy/README.md#foundry-evaluator-findings)): on the sample suite the judge agreed with the
 checks on 9 of 12 turns, and every disagreement was a correct turn it failed. `tool_call_accuracy` scores a correct call
@@ -223,6 +225,6 @@ with Python 3.11 and 3.14 and on Windows with 3.14. Changes that touch only docs
 Azure credentials and calls nothing live. Dependabot (`.github\dependabot.yml`) opens weekly PRs for the pinned Python
 packages (grouping minor and patch bumps), the sample server's base image and the workflows' actions; CI checks each one.
 
-`.github\workflows\live.yml` runs the sample tool tests and agent evals against the deployed toolbox and agent every day
-at 12:00 UTC and on demand, signed in as a managed identity through OIDC, and puts both reports in the job summary.
-Setup and limits: [docs/live-ci.md](docs/live-ci.md).
+`.github\workflows\live.yml` runs the sample tool tests and agent evals against the deployed toolbox and agent, then has
+Foundry's evaluators judge the agent's replies, every day at 12:00 UTC and on demand. It signs in as a managed identity
+through OIDC and puts the three reports in the job summary. Setup and limits: [docs/live-ci.md](docs/live-ci.md).

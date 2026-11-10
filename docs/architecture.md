@@ -157,7 +157,7 @@ flowchart TB
 | `sample-mcp-server/` | Synthetic MCP server, packaged as a container image: three tools, plus Entra token validation (`entra_auth.py`), region filtering and `whoami` with `AUTH_MODE=entra` |
 | `tests/` | Offline unit tests: no Azure access or `.env` needed |
 | `.github/workflows/ci.yml` | CI on pushes to `main` and pull requests: dependency check, byte-compile, case validation and unit tests on Ubuntu (Python 3.11 and 3.14) and Windows (3.14). Offline only |
-| `.github/workflows/live.yml` | Daily and manual live runs of the sample tool tests and agent evals, as a managed identity signed in through OIDC; reports go to the job summary and result files stay on the runner ([live-ci.md](live-ci.md)) |
+| `.github/workflows/live.yml` | Daily and manual live runs of the sample tool tests and agent evals, then Foundry's evaluators on the agent's replies, as a managed identity signed in through OIDC; reports go to the job summary and result files stay on the runner ([live-ci.md](live-ci.md)) |
 | `.github/dependabot.yml` | Weekly update PRs for the pinned packages in both `requirements.txt` files, the sample server's base image and the CI actions |
 
 ## 4. Cases and results
@@ -854,9 +854,9 @@ these verdicts that applies:
 6. `skipped`: every evaluator found itself not applicable.
 7. `not_judged`: no evaluator returned a result.
 
-A turn passes on `pass` or `skipped`, and the runner exits 0 only when every turn passed. `report.py cloud` sets each
-verdict against the same turn's deterministic result: how often the judge and the checks agree, and which turns only
-one of them failed.
+A turn passes on `pass` or `skipped`, and the runner exits 0 only when every turn passed; with `--fail-on unjudged`, as
+live CI runs it, only `error` and `not_judged` turns make it exit 1. `report.py cloud` sets each verdict against the
+same turn's deterministic result: how often the judge and the checks agree, and which turns only one of them failed.
 
 On the sample suite (November 2026, judge `gpt-4-1-mini`), the judge and the checks agreed on 9 of 12 turns of a
 chained run, and every disagreement was a correct turn the judge failed: both tool-error turns on `tool_call_accuracy`,
@@ -986,8 +986,9 @@ ignores the MCP SDK's `params._meta` copy; so a tool-test case's trace also reac
 Both runners exit 0 when every case passes, 1 when any fails, and 2 on a setup problem: invalid cases, a missing endpoint
 or config, or no sign-in. Only the tool runner's first connection is part of setup, so there a connection failure or a
 tool source that needs consent exits 2; the agent runner fails the affected turns and runs the rest.
-`run_cloud_eval.py` exits 0 when every turn passed, 1 when one failed, errored or wasn't judged, and 2 on a setup
-error, an error from the evals API, or an evaluation run that failed, was canceled or didn't end in time.
+`run_cloud_eval.py` exits 0 when every turn passed, 1 when one failed, errored or wasn't judged (with
+`--fail-on unjudged`, only when one errored or wasn't judged), and 2 on a setup error, an error from the evals API, or an
+evaluation run that failed, was canceled or didn't end in time.
 `scripts/run_assert.py` exits 2 on usage errors and otherwise returns ASSERT's exit code.
 
 ## 12. Sample deployment
@@ -1104,6 +1105,9 @@ Deploy steps and current findings: [getting-started.md](getting-started.md) and 
     trusts only the `live` environment, which only `main` can use.
   - `az` does the sign-in, so the runners' `AzureCliCredential` works unchanged.
   - Result files stay on the runner because they name the endpoint. The reports don't, so they go to the job summary.
+  - Foundry's evaluators judge the agent evals' stored replies, but only turns they couldn't judge fail the job
+    (`--fail-on unjudged`). The judge fails some correct turns of the sample suite, so failing on its verdicts would
+    keep the job red; its verdicts are in the report.
 
 ## 15. Extending
 

@@ -1,9 +1,9 @@
 # Live runs in CI
 
 `.github/workflows/live.yml` runs the tool tests and the deterministic agent evals against the deployed sample toolbox
-and agent, every day at 12:00 UTC and on demand. It signs in to Azure as a user-assigned managed identity with GitHub's
-OIDC token, so the repository stores no Azure credential. The offline checks stay in `ci.yml`
-([README](../README.md#unit-tests-and-ci)).
+and agent, then has Foundry's evaluators judge the agent's replies, every day at 12:00 UTC and on demand. It signs in to
+Azure as a user-assigned managed identity with GitHub's OIDC token, so the repository stores no Azure credential. The
+offline checks stay in `ci.yml` ([README](../README.md#unit-tests-and-ci)).
 
 ## 1. What a run does
 
@@ -11,10 +11,10 @@ OIDC token, so the repository stores no Azure credential. The offline checks sta
 | --- | --- |
 | Triggers | `schedule` (daily, 12:00 UTC) and `workflow_dispatch`; one run at a time |
 | Identity | A user-assigned managed identity with **Foundry User** on the project, trusted through a federated credential for the `live` environment |
-| Suites | `data/tool-tests/sample-toolbox.jsonl` (14 cases) against `sample-customer-toolbox`, then `data/agent-evals/sample-toolbox.jsonl` (12 turns) against `customer-assistant`. The agent evals run even if the tool tests fail |
-| Output | The tool and agent reports from `scripts/report.py`, in the job summary. Result files stay on the runner |
+| Suites | `data/tool-tests/sample-toolbox.jsonl` (14 cases) against `sample-customer-toolbox`, then `data/agent-evals/sample-toolbox.jsonl` (12 turns) against `customer-assistant`. The agent evals run even if the tool tests fail. Then, if the agent evals recorded a run, Foundry's evaluators judge its replies by their stored response IDs, so the agent isn't called again (`evals/run_cloud_eval.py --fail-on unjudged --timeout 15`) |
+| Output | The tool, agent and cloud reports from `scripts/report.py`, in the job summary. Result files stay on the runner |
 | Telemetry | Spans go to App Insights with `cloud_RoleInstance` set to `github-actions-<run id>` ([telemetry.md](telemetry.md#2-configure)) |
-| Status | The job fails if either suite fails. In a suite's log, exit code 1 means failed cases and 2 a setup error |
+| Status | The job fails if either suite fails, or if the evaluators can't run or can't judge a turn. The judge's failures show in the cloud report without failing the job, because on the sample suite it fails turns that are correct ([findings](../deploy/README.md#foundry-evaluator-findings)). In a step's log, exit code 1 means failed cases (for the evaluators, turns they couldn't judge) and 2 a setup error |
 
 Not in the workflow:
 
@@ -24,7 +24,8 @@ Not in the workflow:
   (`scripts/run_assert.py`).
 
 To test another toolbox or agent, change the case files in `live.yml` and add `FOUNDRY_TOOLBOX_NAME` and
-`FOUNDRY_AGENT_NAME` to its `env`.
+`FOUNDRY_AGENT_NAME` to its `env`; for a judge deployment other than `gpt-4-1-mini`, add
+`FOUNDRY_EVAL_JUDGE_DEPLOYMENT`.
 
 ## 2. How it signs in
 
@@ -49,7 +50,7 @@ sequenceDiagram
     E-->>L: access token, cached by az
     R->>L: AzureCliCredential runs az account get-access-token
     L-->>R: the cached token
-    R->>F: MCP calls to the toolbox, Responses API calls to the agent
+    R->>F: MCP calls to the toolbox, Responses API calls to the agent, an evaluation run
     R-->>J: reports for the job summary
 ```
 
@@ -118,7 +119,7 @@ gh workflow run live.yml --ref main
 gh run watch   # pick the run
 ```
 
-The run's summary page shows both reports. Once `live.yml` is on `main`, the schedule runs it daily.
+The run's summary page shows the three reports. Once `live.yml` is on `main`, the schedule runs it daily.
 
 ## 4. Public repositories
 
@@ -128,6 +129,8 @@ A public repository's logs and job summaries are public.
   can appear without the rest of the endpoint.
 - Result files never leave the runner: they hold the endpoint, and GitHub doesn't mask artifacts. The reports hold no
   endpoint: they name the agent, model, toolbox, versions and commit, and list case IDs, failure messages and timings.
+  The cloud report adds the judge deployment, the evaluation's name and run ID, and the judge's reasons. In GitHub
+  Actions the evaluators' runner leaves out the evaluation's portal link, which names the resource group.
 - Forks and pull requests can't use the trust. The workflow has no pull request trigger, and the `live` environment, which
   holds the secrets and is the only subject the federated credential accepts, takes runs from `main` only.
 
@@ -137,7 +140,11 @@ A public repository's logs and job summaries are public.
   workflow on the Actions tab.
 - Scheduled runs can start late, or be dropped, when GitHub Actions is busy, most often at the start of an hour. Move the
   cron minute if that matters.
-- Each run spends the agent's model tokens on 12 turns.
+- Each run spends the agent's model tokens on 12 turns, and the judge's: judging the 12 turns took about 93,000 tokens in
+  a local run. When the judge and the agent share a deployment, as on the sample, they share its rate limit; the job
+  judges only after the agent evals end, but other runs against the deployment compete with it.
+- The evaluation run took about 2.5 minutes locally. The job waits up to 15 minutes for it, then fails with exit code 2;
+  the run goes on in Foundry.
 
 ## 6. Troubleshooting
 
@@ -149,3 +156,5 @@ A public repository's logs and job summaries are public.
 | HTTP 401 or 403 from Foundry | The role assignment hasn't applied yet, or it is on another project |
 | `Branch "<name>" is not allowed to deploy to live due to environment protection rules` | The run is not on `main` |
 | Sign-in can't select the subscription | `AZURE_SUBSCRIPTION_ID` isn't the project's subscription |
+| The Foundry evaluators step is skipped | The agent evals recorded no run, after a setup error; see their step's log |
+| `the evaluation run is still <status> after 15 minutes` | Foundry hadn't finished judging. The run goes on there; look for other load on the judge deployment, then re-run the workflow |
