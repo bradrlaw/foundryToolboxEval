@@ -261,6 +261,8 @@ The agent evals prove:
 $env:FOUNDRY_AGENT_NAME = "customer-assistant-oauth"; .\.venv\Scripts\python scripts\run_assert.py evals\configs\<config>.yaml
 ```
 
+If `FOUNDRY_AGENT_VERSION` is set, it pins the OAuth agent's version too: unset it, or set one of that agent's versions.
+
 With the default roles, expect 11/11 and 6/6. As a check that the cases catch a server that ignores identity, the same
 tool tests against the unauthenticated toolbox fail 7 of 11: `whoami` is missing, and denied customers come back in full.
 

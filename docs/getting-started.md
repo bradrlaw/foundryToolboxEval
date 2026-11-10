@@ -12,7 +12,7 @@ test layer. If you already have a Foundry project, toolbox and agent, skip to
 | Microsoft Foundry resource + project | Create in the Azure portal / ai.azure.com. Note the project endpoint: `https://<resource>.services.ai.azure.com/api/projects/<project>` |
 | Chat model deployment in the project | For the agent, e.g. `gpt-4-1-mini` |
 | Judge model deployment (ASSERT only) | Default config uses `gpt-5.6-sol`; any strong model works if you edit the YAML `azure/<deployment>` names. The deployment must be on the same resource as `AZURE_API_BASE` |
-| Evaluator judge deployment (Foundry's evaluators only) | `run_cloud_eval` uses `gpt-4-1-mini`, the agent's deployment, unless `FOUNDRY_EVAL_JUDGE_DEPLOYMENT` or `--judge` names another deployment in the project |
+| Evaluator judge deployment (Foundry's evaluators only) | `run_cloud_eval` and `calibrate_evaluators` use `gpt-4-1-mini`, the agent's deployment, unless `FOUNDRY_EVAL_JUDGE_DEPLOYMENT` or `--judge` names another deployment in the project |
 | Foundry roles | **Azure AI User** (or higher) on the project for the signed-in user; **Cognitive Services OpenAI User** on the resource for the judge. Foundry's evaluators call a model deployment, which needs **Azure AI User** (renamed **Foundry User**) on the Foundry resource, not only the project ([Learn](https://learn.microsoft.com/azure/foundry/observability/how-to/evaluation-permissions)) |
 | Tools | Python 3.11+, Azure CLI (`az`), Git. Docker is not required (`az acr build` builds in the cloud) |
 
@@ -78,7 +78,9 @@ The toolbox consumer endpoint is
 .\.venv\Scripts\python scripts\deploy_agent.py --model <your-chat-deployment>   # --dry-run prints the request
 ```
 
-This publishes a new version of the prompt agent `customer-assistant`, with the toolbox attached as an MCP tool.
+This publishes a new version of the prompt agent `customer-assistant`, with the toolbox attached as an MCP tool. The
+runners call the agent's latest version unless `FOUNDRY_AGENT_VERSION` names one, such as 2 to rerun an older version
+on the same cases; the agent-eval runner and `run_cloud_eval --target` also take `--agent-version`.
 
 No runner config file is needed. The tool-test runner calls `<FOUNDRY_PROJECT_ENDPOINT>/toolboxes/<FOUNDRY_TOOLBOX_NAME>/mcp`
 and the agent runners call `FOUNDRY_AGENT_NAME`; the names default to `sample-customer-toolbox` and `customer-assistant`.
@@ -91,7 +93,7 @@ To test a different toolbox endpoint, pass `--endpoint <url>`, or copy `config\t
 # Tool tests: call the toolbox directly (schema, errors, auth, latency)
 .\.venv\Scripts\python -m tooltests.run data\tool-tests\sample-toolbox.jsonl
 
-# Agent evals: deterministic checks of tool selection, arguments and answer content; add --repetitions 3 to find flaky turns
+# Agent evals: deterministic checks of tools, arguments, answers and figures; add --repetitions 3 to find flaky turns
 .\.venv\Scripts\python -m evals.run_agent_evals data\agent-evals\sample-toolbox.jsonl
 
 # ASSERT behavior evals (LLM-judged); artifacts go to results\assert
@@ -100,6 +102,9 @@ To test a different toolbox endpoint, pass `--endpoint <url>`, or copy `config\t
 
 # Evaluators in Foundry judge the newest agent-eval run's stored replies; results go to results\cloud-evals
 .\.venv\Scripts\python -m evals.run_cloud_eval
+
+# After changing an evaluator's judge prompt or the judge model: check the 11 calibration turns' verdicts
+.\.venv\Scripts\python -m evals.calibrate_evaluators --repetitions 3
 
 # Reports (markdown): pass rates, why cases failed; add --baseline <older run> to diff
 .\.venv\Scripts\python scripts\report.py tool
@@ -112,8 +117,9 @@ Expected for the samples: tool tests 14/14 and agent evals 12/12. In the `tool_e
 `c-unknown-customer`) a tool returns an error, and the agent must explain it without leaking the raw error text. If the
 platform aborts the request instead (see Troubleshooting), those turns fail as `platform_abort`. ASSERT results vary from
 run to run, and the November 2026 runs still found violations ([findings](../deploy/README.md#assert-findings)).
-In November 2026 Foundry's evaluators passed all 12 turns. The built-in ones used before failed 3 that the checks pass,
-both `tool_error` turns and the second turn of `c-recall` ([findings](../deploy/README.md#foundry-evaluator-findings)).
+In November 2026 Foundry's evaluators passed all 12 turns, and the calibration matched all 66 verdicts of 3 runs. The
+built-in evaluators used before failed 3 turns that the checks pass, both `tool_error` turns and the second turn of
+`c-recall` ([findings](../deploy/README.md#foundry-evaluator-findings)).
 
 The runners exit 0 when everything passes, 1 when a case fails, and 2 on invalid cases or a setup error (the cloud
 runner also when the evaluation run fails). A run with failures ends with a line such as

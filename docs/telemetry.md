@@ -1,6 +1,7 @@
 # OpenTelemetry to Application Insights
 
-All three runners emit spans to Application Insights when a connection string is set. Without it nothing is exported.
+The tool-test, agent-eval and ASSERT runners emit spans to Application Insights when a connection string is set. Without
+it nothing is exported. Foundry's evaluators run in Foundry, so `run_cloud_eval` and `calibrate_evaluators` emit none.
 
 ## 1. Get an App Insights resource
 

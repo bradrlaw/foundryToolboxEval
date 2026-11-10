@@ -33,7 +33,8 @@ needed. For a toolbox outside that project, pass `--endpoint <url>`, or copy `co
 `--config`.
 
 The agent is invoked by name through the Responses API (`agent_reference`); `evals\foundry_agent\target.py` reads
-`FOUNDRY_AGENT_NAME`. Tool names in a toolbox are `{server_label}___{tool}`; list them with a `list`-kind tool test.
+`FOUNDRY_AGENT_NAME`, and `FOUNDRY_AGENT_VERSION` if set, to call one version instead of the latest. Tool names in a
+toolbox are `{server_label}___{tool}`; list them with a `list`-kind tool test.
 
 ## 3. Author tests for your tools
 
@@ -55,6 +56,11 @@ flaky.
 .\.venv\Scripts\python -m evals.run_agent_evals data\agent-evals\mine.jsonl
 .\.venv\Scripts\python -m evals.run_cloud_eval     # evaluators in Foundry judge that run's replies
 ```
+
+Before trusting this repo's evaluators with another judge model, or after changing a judge prompt in
+`evals\evaluators\`, run `.\.venv\Scripts\python -m evals.calibrate_evaluators --repetitions 3`. It checks their
+verdicts on turns with known answers in `data\evaluator-calibration\`; add turns from your own agent there
+(`schemas\evaluator-calibration.schema.json`) to check the verdicts on your data.
 
 ## 4. ASSERT behaviors for your agent
 
@@ -91,9 +97,9 @@ If a toolbox connection uses OAuth2 identity passthrough, the MCP server sees th
 ## 7. Live runs in CI
 
 To run your suites daily in GitHub Actions as a managed identity, follow [live-ci.md](live-ci.md), then change the case
-files in `live.yml` and add `FOUNDRY_TOOLBOX_NAME` and `FOUNDRY_AGENT_NAME` to its `env`, plus
-`FOUNDRY_EVAL_JUDGE_DEPLOYMENT` if your evaluator judge isn't `gpt-4-1-mini`. Suites that need a signed-in user
-(identity passthrough, `{{caller.*}}`) can't run there.
+files in `live.yml` and add `FOUNDRY_TOOLBOX_NAME` and `FOUNDRY_AGENT_NAME` to its `env`, plus `FOUNDRY_AGENT_VERSION`
+to pin an agent version and `FOUNDRY_EVAL_JUDGE_DEPLOYMENT` if your evaluator judge isn't `gpt-4-1-mini`. Suites that
+need a signed-in user (identity passthrough, `{{caller.*}}`) can't run there.
 
 ## Caveats
 

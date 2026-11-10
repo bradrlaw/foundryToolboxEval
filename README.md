@@ -34,10 +34,11 @@ Docs: [getting started](docs/getting-started.md) (deploy and run the samples), [
 
 ## Status
 
-Working: sample MCP server, tool-test runner, deterministic agent-eval runner, ASSERT behavior configs, Foundry cloud
-evaluation with this repo's evaluators and built-in ones, reports that show why cases failed, App Insights telemetry,
-offline CI, daily live runs in CI ([docs/live-ci.md](docs/live-ci.md)), and per-user Entra identity through OAuth2
-identity passthrough ([docs/entra.md](docs/entra.md)).
+Working: sample MCP server, tool-test runner, deterministic agent-eval runner with a figure check, ASSERT behavior
+configs, Foundry cloud evaluation with this repo's evaluators (calibrated against turns with known verdicts) and
+built-in ones, reports that show why cases failed, App Insights telemetry, offline CI, daily live runs in CI
+([docs/live-ci.md](docs/live-ci.md)), and per-user Entra identity through OAuth2 identity passthrough
+([docs/entra.md](docs/entra.md)).
 
 ## Setup
 

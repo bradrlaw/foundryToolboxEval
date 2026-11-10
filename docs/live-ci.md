@@ -11,10 +11,10 @@ offline checks stay in `ci.yml` ([README](../README.md#unit-tests-and-ci)).
 | --- | --- |
 | Triggers | `schedule` (daily, 12:00 UTC) and `workflow_dispatch`; one run at a time |
 | Identity | A user-assigned managed identity with **Foundry User** on the Foundry resource, which the evaluators' judge calls need (the rest needs it on the project only), trusted through a federated credential for the `live` environment |
-| Suites | `data/tool-tests/sample-toolbox.jsonl` (14 cases) against `sample-customer-toolbox`, then `data/agent-evals/sample-toolbox.jsonl` (12 turns) against `customer-assistant`. The agent evals run even if the tool tests fail. Then, if the agent evals recorded a run, Foundry's evaluators judge its replies by their stored response IDs, so the agent isn't called again (`evals/run_cloud_eval.py --fail-on unjudged --timeout 15`) |
+| Suites | `data/tool-tests/sample-toolbox.jsonl` (14 cases) against `sample-customer-toolbox`, then `data/agent-evals/sample-toolbox.jsonl` (12 turns) against the latest version of `customer-assistant`. The agent evals run even if the tool tests fail. Then, if the agent evals recorded a run, Foundry's evaluators judge its replies by their stored response IDs, so the agent isn't called again (`evals/run_cloud_eval.py --fail-on unjudged --timeout 15`) |
 | Output | The tool, agent and cloud reports from `scripts/report.py`, in the job summary. Result files stay on the runner |
 | Telemetry | Spans go to App Insights with `cloud_RoleInstance` set to `github-actions-<run id>` ([telemetry.md](telemetry.md#2-configure)) |
-| Status | The job fails if either suite fails, or if the evaluators can't run or can't judge a turn. The judge's failures show in the cloud report without failing the job, because on the sample suite it fails turns that are correct ([findings](../deploy/README.md#foundry-evaluator-findings)). In a step's log, exit code 1 means failed cases (for the evaluators, turns they couldn't judge) and 2 a setup error |
+| Status | The job fails if either suite fails, or if the evaluators can't run or can't judge a turn. The judge's failures show in the cloud report without failing the job, because an LLM judge can fail correct turns, as Foundry's built-in evaluators did on the sample suite ([findings](../deploy/README.md#foundry-evaluator-findings)). In a step's log, exit code 1 means failed cases (for the evaluators, turns they couldn't judge) and 2 a setup error |
 
 Not in the workflow:
 
@@ -22,10 +22,13 @@ Not in the workflow:
   `{{caller.*}}` placeholders need a user's claims; a managed identity has neither.
 - ASSERT, which generates dozens of conversations per behavior and judges each with an LLM. Run it locally
   (`scripts/run_assert.py`).
+- The evaluators' calibration (`evals/calibrate_evaluators.py`), which checks the judge prompts against 11 turns with
+  known verdicts. Run it locally after changing a prompt or the judge model
+  ([README](../README.md#agent-evals-with-foundrys-evaluators)).
 
 To test another toolbox or agent, change the case files in `live.yml` and add `FOUNDRY_TOOLBOX_NAME` and
-`FOUNDRY_AGENT_NAME` to its `env`; for a judge deployment other than `gpt-4-1-mini`, add
-`FOUNDRY_EVAL_JUDGE_DEPLOYMENT`.
+`FOUNDRY_AGENT_NAME` to its `env`, and `FOUNDRY_AGENT_VERSION` to call one version of the agent instead of its latest;
+for a judge deployment other than `gpt-4-1-mini`, add `FOUNDRY_EVAL_JUDGE_DEPLOYMENT`.
 
 ## 2. How it signs in
 
@@ -145,11 +148,11 @@ A public repository's logs and job summaries are public.
   workflow on the Actions tab.
 - Scheduled runs can start late, or be dropped, when GitHub Actions is busy, most often at the start of an hour. Move the
   cron minute if that matters.
-- Each run spends the agent's model tokens on 12 turns, and the judge's: judging the 12 turns took about 93,000 tokens in
-  a local run. When the judge and the agent share a deployment, as on the sample, they share its rate limit; the job
-  judges only after the agent evals end, but other runs against the deployment compete with it.
-- The evaluation run took about 2.5 minutes locally. The job waits up to 15 minutes for it, then fails with exit code 2;
-  the run goes on in Foundry.
+- Each run spends the agent's model tokens on 12 turns, and the judge's: judging the 12 turns took about 81,000 tokens.
+  When the judge and the agent share a deployment, as on the sample, they share its rate limit; the job judges only
+  after the agent evals end, but other runs against the deployment compete with it.
+- The evaluators' step took about 2.5 minutes, most of it waiting for the evaluation run. The job waits up to 15
+  minutes for the run, then fails with exit code 2; the run goes on in Foundry.
 
 ## 6. Troubleshooting
 
