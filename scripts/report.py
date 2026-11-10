@@ -290,8 +290,10 @@ def cloud_intro(run: dict) -> list[str]:
         what = (f"Judged the stored responses of agent run `{run.get('agent_run')}`; the evaluators saw up to "
                 f"{run.get('max_turns')} turns of each conversation.")
     took = f", {run['duration_s']} s" if run.get("duration_s") is not None else ""
-    evaluators = ", ".join(f"`{e}`" for e in run.get("evaluators") or [])
-    judge = (f"Judge `{run.get('judge')}`, built-in evaluators {evaluators}. Evaluation `{run.get('eval_name')}`, "
+    versions = run.get("evaluator_versions") or {}
+    evaluators = ", ".join(f"`{e}`" + (f" (this repo's, catalog version {versions[e]})" if e in versions else "")
+                           for e in run.get("evaluators") or [])
+    judge = (f"Judge `{run.get('judge')}`, evaluators {evaluators}. Evaluation `{run.get('eval_name')}`, "
              f"run `{run.get('eval_run_id')}`{took}.")
     found = Counter(r.get("verdict") for r in run["results"])
     counts = [f"{VERDICTS.get(v, v)} {found[v]}" for v in dict.fromkeys([*VERDICTS, *found]) if found[v]]

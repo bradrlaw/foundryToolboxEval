@@ -55,13 +55,16 @@ Checks: expected tool calls (+ param matching), `must_not_call`, response regex 
   deterministic runner and the ASSERT target alike, so the agent keeps its earlier tool results; `--history replay`
   resends the text as before. In the sample suite's `c-recall`, the chained agent quoted a contract value from its
   earlier lookup in 4 of 4 runs; the replayed one lacked it and made one up in 2 of 4.
-- Foundry cloud evaluation: done. `python -m evals.run_cloud_eval` has Foundry's built-in evaluators (task adherence,
-  intent resolution and tool-call accuracy by default) judge an agent run's stored responses, chained history included,
-  or call the agent with each conversation's first turn (`--target`). Each verdict sits beside the same reply's
-  deterministic result, and `report.py cloud` shows where they agree. On the sample suite they agreed on 9 of 12 turns;
-  every disagreement was a correct turn the judge failed: tool errors on `tool_call_accuracy`, and a figure recalled from
-  an earlier lookup on `task_adherence`. Replayed history now sends earlier replies as `output_text`, which the
-  evaluators require.
+- Foundry cloud evaluation: done. `python -m evals.run_cloud_eval` has evaluators in Foundry judge an agent run's
+  stored responses, chained history included, or call the agent with each conversation's first turn (`--target`). Each
+  verdict sits beside the same reply's deterministic result, and `report.py cloud` shows where they agree. The built-in
+  evaluators first used (task adherence, intent resolution and tool-call accuracy) agreed with the checks on 9 of 12
+  turns of the sample suite; every disagreement was a correct turn the judge failed: tool errors on
+  `tool_call_accuracy`, and a figure recalled from an earlier lookup on `task_adherence`. This repo's `tool_use` and
+  `grounded_adherence` replaced those two as defaults: judge prompts in `evals/evaluators/`, calibrated on synthetic
+  turns and registered in the project's evaluator catalog by the runner. With `intent_resolution` they pass all 12
+  turns and still fail a recalled figure the agent made up. Replayed history now sends earlier replies as
+  `output_text`, which the evaluators require.
 - Agent scoring: done. `--repetitions N` reruns every conversation from a fresh history; a turn passes only if every
   run passes, and the console and reports add pass@1, pass@N, pass^N and the flaky turns. `max_tool_calls` fails a turn
   that makes too many calls, and every turn that checks its calls records `extra_calls`, the calls beyond those expected.
@@ -92,8 +95,8 @@ Checks: expected tool calls (+ param matching), `must_not_call`, response regex 
 - Target: a Foundry toolbox (MCP endpoint `<project>/toolboxes/<name>/mcp?api-version=v1`, Entra token for
   `https://ai.azure.com/.default`) and a Foundry prompt agent invoked through the Responses API.
 - Python, no Foundry SDK: `azure-ai-projects` conflicts with assert-ai's `openai` pin, so the agent target calls REST directly.
-- Deterministic checks plus ASSERT as the LLM judge; Foundry's built-in evaluators as a server-side second opinion,
-  reported beside the checks rather than replacing them.
+- Deterministic checks plus ASSERT as the LLM judge; evaluators in Foundry (this repo's and built-in ones) as a
+  server-side second opinion, reported beside the checks rather than replacing them.
 - Results are local JSON files (`results/`); spans optionally go to Application Insights.
 - Per-user identity uses OAuth2 identity-passthrough connections. Runs use the `az login` user, cases name no real user
   (`{{caller.*}}` placeholders), and consent links are printed to the console only, because they act like bearer secrets.
@@ -102,8 +105,9 @@ Checks: expected tool calls (+ param matching), `must_not_call`, response regex 
 
 - Grounding beyond prompting: rerun both ASSERT behaviors on a fresh test set, since v4's rules were written against the
   current one, then try a stronger agent model or a check of each figure in a reply against the tool results.
-- Cloud evaluation follow-up: a custom evaluator that accepts a correct tool error and grounds a recalled figure in the
-  earlier turns' tool results, so the judge stops failing those turns.
+- Cloud evaluation follow-up: keep the calibration turns for `tool_use` and `grounded_adherence` in the repo, with a
+  script that runs them and compares each verdict with the expected one, so a changed prompt can be checked the same
+  way.
 - Identity: several test identities in one run (a role matrix, each case tagged with the identity it expects); the Entra
   suites in live CI, which need a test user who has consented; hosted agents, which forward `x-agent-foundry-call-id` to
   the toolbox; recheck `UserEntraToken` for custom audiences; confirm consent survives the connection's refresh-token

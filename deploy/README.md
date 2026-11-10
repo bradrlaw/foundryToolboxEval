@@ -144,17 +144,20 @@ With the grounding rules:
 
 ## Foundry evaluator findings
 
-Foundry's built-in `task_adherence`, `intent_resolution` and `tool_call_accuracy` evaluators, judged by `gpt-4-1-mini`,
-ran in November 2026 on the sample suite against v4 (`python -m evals.run_cloud_eval`). The deterministic checks passed
-every turn below:
+Judged by `gpt-4-1-mini` in November 2026 on the sample suite against v4 (`python -m evals.run_cloud_eval`): first
+with Foundry's built-in `task_adherence`, `intent_resolution` and `tool_call_accuracy`, the defaults then, and then
+with this repo's `tool_use` and `grounded_adherence` and the built-in `intent_resolution`, the defaults now. The
+deterministic checks passed every turn below:
 
-| Run | Turns | Judge passed | Judge and checks agree | Judge tokens | Time |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| A chained agent run's stored responses | 12 | 9 | 9 | 92,699 | 161 s |
-| `--target`: Foundry calls the agent with each first turn | 10 | 8 | 8 | 68,422 | 129 s |
+| Evaluators | Run | Turns | Judge passed | Judge tokens | Time |
+| --- | --- | ---: | ---: | ---: | ---: |
+| Built-in | A chained agent run's stored responses | 12 | 9 | 92,699 | 161 s |
+| Built-in | `--target`: Foundry calls the agent with each first turn | 10 | 8 | 68,422 | 129 s |
+| This repo's | The same chained run's stored responses | 12 | 12 | 81,022 | 129 s |
+| This repo's | `--target` | 10 | 10 | 65,817 | 129 s |
 
-- **Every disagreement was a correct turn the judge failed.** The three evaluators cost 6,800 to 7,700 judge tokens a
-  turn.
+- **Every disagreement with the built-in evaluators was a correct turn the judge failed.** The three evaluators cost
+  6,800 to 7,700 judge tokens a turn.
 - **`tool_call_accuracy` fails a correct call that returns an error.** Asked for a privately held customer's stock price,
   or for an unknown customer, the agent made the right call and relayed the error. The evaluator called the call
   relevant and correct, then scored it 2 of 5 because "the tool returned an error and no successful retry was made".
@@ -162,6 +165,15 @@ every turn below:
   contract value its first lookup returned; the evaluator sees earlier turns as text, without their tool results, and
   failed the reply for stating a figure no tool call had provided. A replayed run's made-up value on the same turn
   failed for the same reason.
+- **This repo's evaluators pass those turns and still catch the made-up value.** They get the earlier turns with their
+  tool calls and results. On a replayed `c-recall` run of 6 repetitions, `grounded_adherence` failed the 3 replies
+  that made up a contract value (score 2: "not grounded in any tool result from this conversation") and passed the 3
+  that said it wasn't available, which the checks fail for lacking the value; `tool_use` passed all 6. With
+  `intent_resolution`, they cost 6,400 to 6,800 judge tokens a turn.
+- **The judge prompts needed calibrating.** On 11 synthetic turns with an expected verdict each
+  ([architecture](../docs/architecture.md#8-foundry-evaluators)), early versions let a wrong reply lower `tool_use`'s
+  score for correct calls, and, with the score before the reason in the judge's answer, the judge sometimes gave a
+  score its own reason contradicted: 2, with the reason "the score should be 5".
 - **Text history needed `output_text`.** A replayed run's later turns couldn't be judged at all: every evaluator
   rejected "content type 'input_text' for message with role 'assistant'", how Foundry stores a plain-string reply.
   The agent target (`evals\foundry_agent\target.py`) now sends earlier replies as `output_text`, so a replayed run's

@@ -26,5 +26,8 @@ appinsights = ["azure-monitor-opentelemetry-exporter>=1.0.0b50"]
 [tool.setuptools]
 packages = ["evals", "evals.foundry_agent", "tooltests"]
 
+[tool.setuptools.package-data]
+evals = ["evaluators/*.md"]
+
 [tool.setuptools.dynamic]
 version = {attr = "evals.__version__"}

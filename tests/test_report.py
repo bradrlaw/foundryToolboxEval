@@ -216,7 +216,7 @@ class CloudReportTests(unittest.TestCase):
                       "History: chain (later turns continued the previous turn's stored response).\n\n"
                       "Judged the stored responses of agent run `run-a.json`; the evaluators saw up to 2 turns of "
                       "each conversation.\n\n"
-                      "Judge `gpt-4-1-mini`, built-in evaluators `task_adherence`, `tool_call_accuracy`, `coherence`. "
+                      "Judge `gpt-4-1-mini`, evaluators `task_adherence`, `tool_call_accuracy`, `coherence`. "
                       "Evaluation `toolbox-eval-responses-12345678`, run `r1`, 25 s.\n\n"
                       "Verdicts: pass 2, fail 2, error 1. Judge tokens: 10,000 (9,000 input, 1,000 output).\n\n"
                       "| Evaluator | Passed | Failed | Errored | Not applicable |\n"
@@ -236,6 +236,11 @@ class CloudReportTests(unittest.TestCase):
         self.assertIn("| `coherence` | 1 | The judge failed the turn on the built-in coherence evaluator. |", text)
         self.assertIn("- `c#4`: tool_call_accuracy error: no tool definitions", text)
         self.assertNotIn("Tokens:", text)
+
+    def test_this_repos_evaluators_show_their_catalog_version(self):
+        text = self.report(evaluators=["tool_use", "coherence"], evaluator_versions={"tool_use": "6"})
+        self.assertIn("Judge `gpt-4-1-mini`, evaluators `tool_use` (this repo's, catalog version 6), `coherence`. ",
+                      text)
 
     def test_a_target_run_says_which_cases_foundry_sent_and_the_agents_tokens(self):
         usage = {"input_tokens": 900, "output_tokens": 100, "total_tokens": 1000}

@@ -98,7 +98,7 @@ To test a different toolbox endpoint, pass `--endpoint <url>`, or copy `config\t
 .\.venv\Scripts\python scripts\run_assert.py evals\configs\ungrounded_figures.yaml
 .\.venv\Scripts\python scripts\run_assert.py evals\configs\tool_error_handling.yaml
 
-# Foundry's built-in evaluators judge the newest agent-eval run's stored replies; results go to results\cloud-evals
+# Evaluators in Foundry judge the newest agent-eval run's stored replies; results go to results\cloud-evals
 .\.venv\Scripts\python -m evals.run_cloud_eval
 
 # Reports (markdown): pass rates, why cases failed; add --baseline <older run> to diff
@@ -112,8 +112,8 @@ Expected for the samples: tool tests 14/14 and agent evals 12/12. In the `tool_e
 `c-unknown-customer`) a tool returns an error, and the agent must explain it without leaking the raw error text. If the
 platform aborts the request instead (see Troubleshooting), those turns fail as `platform_abort`. ASSERT results vary from
 run to run, and the November 2026 runs still found violations ([findings](../deploy/README.md#assert-findings)).
-In November 2026 Foundry's evaluators passed 9 of the 12 turns: they failed both `tool_error` turns and the second turn
-of `c-recall`, which the checks pass ([findings](../deploy/README.md#foundry-evaluator-findings)).
+In November 2026 Foundry's evaluators passed all 12 turns. The built-in ones used before failed 3 that the checks pass,
+both `tool_error` turns and the second turn of `c-recall` ([findings](../deploy/README.md#foundry-evaluator-findings)).
 
 The runners exit 0 when everything passes, 1 when a case fails, and 2 on invalid cases or a setup error (the cloud
 runner also when the evaluation run fails). A run with failures ends with a line such as

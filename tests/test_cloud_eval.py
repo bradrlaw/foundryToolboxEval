@@ -4,6 +4,7 @@ import email.message
 import io
 import json
 import os
+import re
 import tempfile
 import unittest
 import urllib.error
@@ -112,6 +113,14 @@ class ApiTests(unittest.TestCase):
         self.assertEqual((req.full_url, req.get_method()), (PROJECT + "/openai/v1/evals", "POST"))
         self.assertEqual(req.get_header("Authorization"), "Bearer tok")
         self.assertEqual(json.loads(req.data), {"name": "n"})
+        self.assertIsNone(req.get_header("Foundry-features"))
+
+    def test_evaluator_catalog_requests_go_to_the_project_and_opt_in_to_the_preview(self):
+        self.urlopen.return_value = Reply({"value": []})
+        self.api.call("GET", "/evaluators/x/versions?api-version=v1")
+        req = self.urlopen.call_args.args[0]
+        self.assertEqual(req.full_url, PROJECT + "/evaluators/x/versions?api-version=v1")
+        self.assertEqual(req.get_header("Foundry-features"), "Evaluations=V1Preview")
 
     def test_a_get_is_retried_on_transient_errors_and_broken_connections(self):
         self.urlopen.side_effect = [http_error(503), urllib.error.URLError("no DNS"), TimeoutError("timed out"),
@@ -169,6 +178,42 @@ class PagingTests(unittest.TestCase):
         self.assertEqual(call.call_count, 3)
 
 
+class CatalogTests(unittest.TestCase):
+    VERSIONS = "/evaluators/toolbox_eval_tool_use/versions?api-version=v1"
+
+    def setUp(self):
+        self.api = cloud.EvalsAPI(PROJECT)
+        self.entry = cloud.custom_entry("tool_use")
+        self.older = {**self.entry, "version": "1", "definition": {**self.entry["definition"], "prompt_text": "old"}}
+
+    def test_a_version_with_the_same_definition_is_reused_from_any_page(self):
+        pages = [{"value": [self.older], "nextLink": PROJECT + self.VERSIONS + "&skip=1"},
+                 {"value": [{**self.entry, "version": "2", "created_by": "Ada"}], "nextLink": ""}]
+        with mock.patch.object(self.api, "call", side_effect=pages) as call:
+            self.assertEqual(self.api.catalog_version(self.entry), ("2", False))
+        self.assertEqual([c.args for c in call.call_args_list],
+                         [("GET", self.VERSIONS), ("GET", self.VERSIONS + "&skip=1")])
+
+    def test_a_version_is_registered_when_none_has_the_definition(self):
+        # A next link outside the project isn't followed.
+        pages = [{"value": [self.older], "nextLink": "https://elsewhere.test/evaluators/x"}, {"version": "3"}]
+        with mock.patch.object(self.api, "call", side_effect=pages) as call:
+            self.assertEqual(self.api.catalog_version(self.entry), ("3", True))
+        self.assertEqual(call.call_args.args, ("POST", self.VERSIONS, self.entry))
+        self.assertEqual(call.call_count, 2)
+        with mock.patch.object(self.api, "call", side_effect=[{"value": []}, {"name": "toolbox_eval_tool_use"}]):
+            with self.assertRaisesRegex(cloud.CloudEvalError, "no version of toolbox_eval_tool_use"):
+                self.api.catalog_version(self.entry)
+
+    def test_each_prompt_takes_the_inputs_its_mappings_fill_and_returns_a_score_and_reason(self):
+        for name in cloud.CUSTOM_EVALUATORS:
+            prompt = cloud.custom_entry(name)["definition"]["prompt_text"]
+            for source, mapping in cloud.CUSTOM_MAPPINGS.items():
+                self.assertEqual(set(re.findall(r"\{\{(\w+)\}\}", prompt)), set(mapping), (name, source))
+            self.assertRegex(prompt, r'\{"reason": .*"result": <integer')
+            self.assertNotIn("\r", prompt)  # the same definition, and so the same version, on Windows and Linux
+
+
 class WaitTests(unittest.TestCase):
     def wait(self, states, clock, timeout_s=600):
         api = cloud.EvalsAPI(PROJECT)
@@ -213,6 +258,25 @@ class BuilderTests(unittest.TestCase):
         self.assertEqual(adherence["data_mapping"], {"query": "{{item.query}}", "response": "{{sample.output_items}}"})
         self.assertEqual(accuracy["data_mapping"]["tool_definitions"], "{{sample.tool_definitions}}")
         self.assertNotIn("tool_calls", accuracy["data_mapping"])
+
+    def test_this_repos_evaluators_run_at_their_catalog_version_with_the_whole_conversation(self):
+        evaluators, versions = ("tool_use", "intent_resolution"), {"tool_use": "6"}
+        responses = cloud.eval_definition("responses", evaluators, "judge-a", versions)
+        tool_use, intent = responses["testing_criteria"]
+        self.assertEqual({k: tool_use[k] for k in ("evaluator_name", "evaluator_version", "initialization_parameters")},
+                         {"evaluator_name": "toolbox_eval_tool_use", "evaluator_version": "6",
+                          "initialization_parameters": {"deployment_name": "judge-a", "threshold": 3}})
+        # The earlier turns come with their tool calls and results.
+        self.assertEqual(tool_use["data_mapping"], {"query": "{{item.query_history_list}}",
+                                                    "response": "{{sample.output_items}}",
+                                                    "tool_definitions": "{{item.tool_definitions}}"})
+        self.assertNotIn("data_mapping", intent)
+        target = cloud.eval_definition("target", evaluators, "judge-a", versions)["testing_criteria"][0]
+        self.assertEqual(target["data_mapping"], {"query": "{{item.query}}", "response": "{{sample.output_items}}",
+                                                  "tool_definitions": "{{sample.tool_definitions}}"})
+        # A new version of the prompt is a new evaluation.
+        self.assertNotEqual(responses["name"],
+                            cloud.eval_definition("responses", evaluators, "judge-a", {"tool_use": "7"})["name"])
 
     def test_a_target_run_sends_the_first_turn_of_each_conversation(self):
         firsts, left_out = cloud.first_turns([FOLLOW_UP, WHO, LOOKUP])
@@ -302,8 +366,8 @@ class JudgeTests(unittest.TestCase):
         self.assertIsNone(cloud.judge_usage([item(NO_CALLS)]))
 
     def test_evaluator_names_may_have_the_builtin_prefix(self):
-        self.assertEqual(cloud.evaluator_list("builtin.task_adherence, intent_resolution,task_adherence"),
-                         ("task_adherence", "intent_resolution"))
+        self.assertEqual(cloud.evaluator_list("tool_use, builtin.task_adherence, intent_resolution,task_adherence"),
+                         ("tool_use", "task_adherence", "intent_resolution"))
         with self.assertRaises(argparse.ArgumentTypeError):
             cloud.evaluator_list("Task Adherence")
 
@@ -325,12 +389,15 @@ class MainTests(unittest.TestCase):
             p.start()
             self.addCleanup(p.stop)
         self.api = {}
-        for name in ("eval_id", "start", "wait", "output_items"):
+        for name in ("catalog_version", "eval_id", "start", "wait", "output_items"):
             p = mock.patch.object(cloud.EvalsAPI, name)
             self.api[name] = p.start()
             self.addCleanup(p.stop)
         for name in ("FOUNDRY_EVAL_JUDGE_DEPLOYMENT", "FOUNDRY_AGENT_NAME", "GITHUB_ACTIONS"):
             os.environ.pop(name, None)  # restored with the rest of the environment
+        # tool_use's prompt changed since its version 6; grounded_adherence's is version 4.
+        self.api["catalog_version"].side_effect = lambda entry: (
+            ("7", True) if entry["name"] == "toolbox_eval_tool_use" else ("4", False))
         self.api["eval_id"].return_value = ("e1", True)
         self.api["start"].return_value = "r1"
         self.api["wait"].return_value = {"status": "completed", "result_counts": {"passed": 1, "failed": 1},
@@ -358,8 +425,14 @@ class MainTests(unittest.TestCase):
                                                  item(STRAYS, RESOLVES, CALLS_OK, response_id="resp_2")]
         code, saved, out, _ = self.main()
         self.assertEqual(code, 1)
+        versions = {"grounded_adherence": "4", "tool_use": "7"}
+        self.assertEqual([c.args[0]["name"] for c in self.api["catalog_version"].call_args_list],
+                         ["toolbox_eval_grounded_adherence", "toolbox_eval_tool_use"])
         self.api["eval_id"].assert_called_once_with(
-            cloud.eval_definition("responses", cloud.DEFAULT_EVALUATORS, "gpt-4-1-mini"))
+            cloud.eval_definition("responses", cloud.DEFAULT_EVALUATORS, "gpt-4-1-mini", versions))
+        self.assertIn("  grounded_adherence: toolbox_eval_grounded_adherence version 4 in the project's evaluator "
+                      "catalog\n  tool_use: toolbox_eval_tool_use version 7 in the project's evaluator catalog "
+                      "(registered now)\n", out)
         # The evaluators see as many turns as the longest conversation has.
         self.api["start"].assert_called_once_with("e1", cloud.responses_run(
             "responses of run-20260101T000000Z.json", ["resp_1", "resp_2"], 2))
@@ -369,11 +442,12 @@ class MainTests(unittest.TestCase):
         self.assertIn("Judge tokens: 550 (500 input, 50 output)", out)
         self.assertIn("Portal: https://portal.test/r1", out)
         self.assertEqual({k: saved[k] for k in ("kind", "source", "agent_name", "agent_run", "history", "max_turns",
-                                                "judge", "eval_id", "eval_run_id", "status", "provenance")},
+                                                "judge", "evaluator_versions", "eval_id", "eval_run_id", "status",
+                                                "provenance")},
                          {"kind": "cloud", "source": "responses", "agent_name": "my-agent",
                           "agent_run": "run-20260101T000000Z.json", "history": "chain", "max_turns": 2,
-                          "judge": "gpt-4-1-mini", "eval_id": "e1", "eval_run_id": "r1", "status": "completed",
-                          "provenance": provenance})
+                          "judge": "gpt-4-1-mini", "evaluator_versions": versions, "eval_id": "e1",
+                          "eval_run_id": "r1", "status": "completed", "provenance": provenance})
         self.assertEqual([r["verdict"] for r in saved["results"]], ["pass", "fail"])
         self.assertIsNone(saved["agent_usage"])
 
@@ -408,6 +482,7 @@ class MainTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.api["eval_id"].assert_called_once_with(
             cloud.eval_definition("target", ("task_adherence", "tool_call_accuracy"), "env-judge"))
+        self.api["catalog_version"].assert_not_called()  # built-in evaluators only
         body = self.api["start"].call_args.args[1]
         self.assertTrue(body["name"].startswith("my-agent first turns "))
         self.assertEqual([i["item"]["case"] for i in body["data_source"]["source"]["content"]], ["lookup#1", "who#1"])
@@ -447,10 +522,14 @@ class MainTests(unittest.TestCase):
 
     def test_an_api_error_is_a_setup_error(self):
         self.agent_run([turn(1, "resp_1")])
-        self.api["eval_id"].side_effect = cloud.CloudEvalError(403, json.dumps({"error": {"message": "denied"}}))
-        code, _, _, err = self.main()
-        self.assertEqual(code, 2)
-        self.assertIn("evaluation API 403: denied", err)
+        denied = cloud.CloudEvalError(403, json.dumps({"error": {"message": "denied"}}))
+        for step in ("catalog_version", "eval_id"):  # registering an evaluator, or creating the evaluation
+            with self.subTest(step):
+                self.api[step].side_effect = denied
+                code, _, _, err = self.main()
+                self.assertEqual(code, 2)
+                self.assertIn("evaluation API 403: denied", err)
+                self.api["start"].assert_not_called()
 
 
 if __name__ == "__main__":

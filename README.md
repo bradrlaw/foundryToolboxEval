@@ -6,7 +6,7 @@ Evaluate how well a Microsoft Foundry **toolbox** works, at two levels:
    endpoint and assert on correctness, schema conformance, error handling, and latency.
 2. **Agent evals** - run a Foundry agent connected to the toolbox against scenarios and check
    that it selects the right tools, passes the right arguments, and gives a good answer: with deterministic checks,
-   with Microsoft ASSERT as an LLM judge, or with Foundry's built-in evaluators.
+   with Microsoft ASSERT as an LLM judge, or with evaluators in Foundry (this repo's own and built-in ones).
 
 Terminology: *tests* call the toolbox directly; *evals* involve an agent.
 
@@ -20,7 +20,7 @@ Docs: [getting started](docs/getting-started.md) (deploy and run the samples), [
 | Path | Purpose |
 | --- | --- |
 | `tooltests/` | Tool-test runner: an MCP client for the toolbox endpoint |
-| `evals/` | Deterministic agent-eval runner, Foundry cloud-evaluation runner (`run_cloud_eval.py`), the agent target ASSERT calls (`foundry_agent/target.py`), ASSERT configs (`configs/`), shared auth, case loading, retries and telemetry |
+| `evals/` | Deterministic agent-eval runner, Foundry cloud-evaluation runner (`run_cloud_eval.py`) and its judge prompts (`evaluators/`), the agent target ASSERT calls (`foundry_agent/target.py`), ASSERT configs (`configs/`), shared auth, case loading, retries and telemetry |
 | `schemas/` | JSON Schemas for tool-test and agent-eval JSONL |
 | `data/tool-tests/`, `data/agent-evals/` | Tool-test cases and agent-eval scenarios (JSONL) |
 | `config/` | Optional target config example; `*.local.json` is git-ignored |
@@ -35,9 +35,9 @@ Docs: [getting started](docs/getting-started.md) (deploy and run the samples), [
 ## Status
 
 Working: sample MCP server, tool-test runner, deterministic agent-eval runner, ASSERT behavior configs, Foundry cloud
-evaluation with the built-in evaluators, reports that show why cases failed, App Insights telemetry, offline CI, daily
-live runs in CI ([docs/live-ci.md](docs/live-ci.md)), and per-user Entra identity through OAuth2 identity passthrough
-([docs/entra.md](docs/entra.md)).
+evaluation with this repo's evaluators and built-in ones, reports that show why cases failed, App Insights telemetry,
+offline CI, daily live runs in CI ([docs/live-ci.md](docs/live-ci.md)), and per-user Entra identity through OAuth2
+identity passthrough ([docs/entra.md](docs/entra.md)).
 
 ## Setup
 
@@ -157,10 +157,18 @@ agent request through October 2026, now reach the model as text.
 
 ## Agent evals with Foundry's evaluators
 
-Foundry's evaluation service can judge the agent server-side with its built-in evaluators: `task_adherence`,
-`intent_resolution` and `tool_call_accuracy` by default (`--evaluators`), judged by the model deployment `--judge`, else
-`FOUNDRY_EVAL_JUDGE_DEPLOYMENT`, else `gpt-4-1-mini` (how it works:
+Foundry's evaluation service can judge the agent server-side, by default with this repo's two evaluators and Foundry's
+built-in `intent_resolution` (`--evaluators`; built-in names such as `task_adherence` work too), judged by the model
+deployment `--judge`, else `FOUNDRY_EVAL_JUDGE_DEPLOYMENT`, else `gpt-4-1-mini` (how it works:
 [architecture](docs/architecture.md#8-foundry-evaluators)):
+
+- `tool_use`: the turn made the tool calls the request needed, with the right arguments. A right call whose result is
+  an error, such as no customer with that ID, counts as right.
+- `grounded_adherence`: every fact in the reply comes from a tool result of this turn or an earlier one, and the reply
+  follows the agent's instructions and answers the request, or says plainly what isn't available.
+
+Their judge prompts are `evals\evaluators\<name>.md`. The runner registers each in the project's evaluator catalog as
+`toolbox_eval_<name>`, with a new version when its prompt changes, and the evaluation uses that version.
 
 ```powershell
 .\.venv\Scripts\python -m evals.run_cloud_eval                      # the stored replies of the newest agent run
@@ -184,10 +192,11 @@ didn't, and 2 on a setup or API error or when the evaluation run failed, was can
 reported but don't fail the run, as in live CI. When the judge and the agent share a model deployment they share its
 rate limit, so run one job at a time.
 
-Findings ([deploy/README.md](deploy/README.md#foundry-evaluator-findings)): on the sample suite the judge agreed with the
-checks on 9 of 12 turns, and every disagreement was a correct turn it failed. `tool_call_accuracy` scores a correct call
-that returns an error 2 of 5 for making no successful retry, and `task_adherence` fails a figure recalled from an
-earlier lookup, since it sees earlier turns without their tool results.
+Findings ([deploy/README.md](deploy/README.md#foundry-evaluator-findings)): on the sample suite, Foundry's built-in
+`tool_call_accuracy` and `task_adherence` failed 3 correct turns of 12. `tool_call_accuracy` scores a correct call that
+returns an error 2 of 5 for making no successful retry, and `task_adherence` fails a figure recalled from an earlier
+lookup, since it sees earlier turns without their tool results. This repo's evaluators, which replaced them as defaults,
+pass all 12 turns and fail a recalled figure the agent made up.
 
 ## Reports
 

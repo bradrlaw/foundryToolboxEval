@@ -57,6 +57,11 @@ AGENT_REASONS = {
 # Cloud evaluation (evals/run_cloud_eval.py). A turn an evaluator fails gets the evaluator's name as its reason;
 # scripts/report.py describes built-in evaluators missing here in general terms.
 CLOUD_REASONS = {
+    "grounded_adherence": "The judge found a fact or figure in the reply that no tool result in the conversation "
+                          "supports, or a reply that breaks the agent's instructions or doesn't answer the request "
+                          "(this repo's evaluator, scored 1 to 5, failing below 3).",
+    "tool_use": "The judge found the turn's tool calls wrong, missing or unneeded; a right call whose result is an "
+                "error counts as right (this repo's evaluator, scored 1 to 5, failing below 3).",
     "task_adherence": "The judge found that the reply strays from the agent's instructions or the user's task, for "
                       "example a figure it can't trace to a tool result in the conversation (scored 1 or 0).",
     "intent_resolution": "The judge found that the reply doesn't resolve what the user asked (scored 1 to 5, failing "

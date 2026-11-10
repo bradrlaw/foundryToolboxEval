@@ -15,14 +15,15 @@ The repo tests a toolbox at two levels. *Tests* call the toolbox directly; *eval
 | Tool tests | `python -m tooltests.run` | Toolbox MCP endpoint (Streamable HTTP, JSON-RPC) | Tool listing and definitions, results (assertions), error outcomes, auth status codes, latency | `results/tool-tests/run-*.json` |
 | Agent evals, deterministic | `python -m evals.run_agent_evals` | Prompt agent through the Responses API | Expected tool calls and arguments (optionally ordered), forbidden calls, response regexes, latency | `results/agent-evals/run-*.json` |
 | Agent evals, ASSERT | `python scripts/run_assert.py <config>` | `assert-ai`, which drives the agent through `evals/foundry_agent/target.py` and judges it with an LLM | Violation rate for one behavior per config (for example ungrounded figures, raw error replies) | `results/assert/results/<suite>/<run>/` |
-| Agent evals, Foundry evaluators | `python -m evals.run_cloud_eval` | Foundry's evaluation service, which judges an agent run's stored responses, or calls the agent itself (`--target`) | Built-in LLM evaluators (task adherence, intent resolution, tool-call accuracy) per turn, and how often they agree with the deterministic checks | `results/cloud-evals/run-*.json` |
+| Agent evals, Foundry evaluators | `python -m evals.run_cloud_eval` | Foundry's evaluation service, which judges an agent run's stored responses, or calls the agent itself (`--target`) | LLM evaluators per turn (this repo's tool use and grounded adherence, and Foundry's built-in intent resolution), and how often they agree with the deterministic checks | `results/cloud-evals/run-*.json` |
 
 The agent-eval paths complement each other:
 
 - The deterministic runner checks exact calls and parameters, which the judges do not.
 - ASSERT judges open-ended behavior, which regexes cannot, with test cases it generates for one behavior at a time.
-- Foundry's built-in evaluators judge the same turns the deterministic runner scored, server-side, with no judge to host.
-  They rate general qualities rather than one behavior, so the report compares their verdicts with the checks.
+- Foundry's evaluation service judges the same turns the deterministic runner scored, server-side, with no judge to
+  host, with this repo's evaluators and a built-in one. They rate general qualities rather than one behavior, so the
+  report compares their verdicts with the checks.
 - The deterministic runner and ASSERT call the agent through the same target code, so a platform quirk shows up the
   same way in each.
 
@@ -105,6 +106,7 @@ flowchart TB
     assertai["assert-ai"]
     az["scripts/_az.py<br/>az CLI and az rest with retries"]
     configs[("evals/configs/*.yaml")]
+    prompts[("evals/evaluators/*.md<br/>judge prompts")]
     files[("schemas/*.json<br/>data/*/*.jsonl")]
     results[("results/")]
 
@@ -120,6 +122,7 @@ flowchart TB
     target --> terr
     rce --> cases
     rce --> common
+    rce --> prompts
     rce -->|"score_turn, run provenance"| rae
     target & rce --> retry
     rass --> configs
@@ -139,7 +142,7 @@ flowchart TB
 | --- | --- |
 | `tooltests/run.py` | MCP client for the toolbox: one session per run, outcome classification, assertions, latency percentiles, reconnects |
 | `evals/run_agent_evals.py` | Runs multi-turn conversations against the agent, each later turn continuing the previous turn's stored response (or replaying the text), optionally several times over, and scores every turn |
-| `evals/run_cloud_eval.py` | Has Foundry's evaluation service judge the agent with built-in evaluators: creates or reuses an evaluation, runs it over an agent run's stored responses or, with `--target`, over the first turns of case files, polls the run, and turns each output item into a verdict per turn beside that turn's deterministic result |
+| `evals/run_cloud_eval.py` | Has Foundry's evaluation service judge the agent with this repo's evaluators (judge prompts in `evals/evaluators/`, registered in the project's evaluator catalog) and built-in ones: creates or reuses an evaluation, runs it over an agent run's stored responses or, with `--target`, over the first turns of case files, polls the run, and turns each output item into a verdict per turn beside that turn's deterministic result |
 | `evals/foundry_agent/target.py` | Calls the agent through the Responses API with retries, continuing a stored response when given one, reads `mcp_call` and `message` output items, detects platform aborts and turns the agent never ran (`abort_reason`), and emits agent and tool spans. Its `chat()` is ASSERT's callable target: it continues the stored response behind a transcript and logs what served each call |
 | `evals/cases.py` | Finds, parses and validates JSONL cases (JSON Schema plus cross-field and cross-file rules), and fills `{{caller.*}}` placeholders |
 | `evals/auth.py` | Entra tokens from `az login`, cached per scope and refreshed 5 minutes before expiry; the signed-in user's claims for placeholders |
@@ -793,17 +796,25 @@ sequenceDiagram
 
 ## 8. Foundry evaluators
 
-`evals/run_cloud_eval.py` has Foundry's evaluation service judge the agent with its built-in evaluators, through the
-project's OpenAI-compatible evals API (`<FOUNDRY_PROJECT_ENDPOINT>/openai/v1/evals`, no `api-version`). The judging runs
-in Foundry; the runner creates or reuses an evaluation, starts a run, waits for it and reads its output items.
+`evals/run_cloud_eval.py` has Foundry's evaluation service judge the agent with this repo's evaluators and Foundry's
+built-in ones, through the project's OpenAI-compatible evals API (`<FOUNDRY_PROJECT_ENDPOINT>/openai/v1/evals`, no
+`api-version`). The judging runs in Foundry; the runner registers this repo's evaluators in the project's evaluator
+catalog, creates or reuses an evaluation, starts a run, waits for it and reads its output items.
 
 ```mermaid
 sequenceDiagram
     autonumber
     participant R as run_cloud_eval.py
+    participant C as Evaluator catalog
     participant E as Evals API
     participant A as Agent, Responses API
     participant J as Judge deployment
+    loop each of this repo's evaluators
+        R->>C: GET /evaluators/toolbox_eval_{name}/versions: one with this definition?
+        opt none yet
+            R->>C: POST a new version: the judge prompt, its inputs and its score
+        end
+    end
     R->>E: GET /evals: is there an evaluation named for these settings?
     opt none yet
         R->>E: POST /evals: data source config, one criterion per evaluator
@@ -826,18 +837,44 @@ sequenceDiagram
 | What is judged | Each turn of an agent run (the one given, else the newest), read by its `response_id`; the agent isn't called again | Foundry's own call to the agent (`--agent`) with the first turn of each conversation |
 | What the evaluators see | Up to `--max-turns` turns of the conversation, the judged one included (default: the run's longest conversation); a chained run's earlier turns come with their tool calls and results | That turn only. Later turns are left out, because a target run can't continue a conversation |
 | Data source | Evaluation: `azure_ai_source`, scenario `responses`. Run: `azure_ai_responses`, retrieving each response with `max_num_turns` | Evaluation: a `custom` item schema (`query`, `case`) plus the sample schema. Run: `azure_ai_target_completions`, sending `{{item.query}}` to an `azure_ai_agent` target |
-| Evaluator inputs | Found by the service | `query` from `{{item.query}}`, `response` from `{{sample.output_items}}`, and for `tool_*` evaluators `tool_definitions` from `{{sample.tool_definitions}}` |
+| Evaluator inputs | This repo's evaluators: `query` from `{{item.query_history_list}}` (the agent's instructions and the earlier turns with their tool calls and results, then the user's message), `response` from `{{sample.output_items}}` and `tool_definitions` from `{{item.tool_definitions}}`. Built-in evaluators: found by the service | `query` from `{{item.query}}`, `response` from `{{sample.output_items}}`, and for this repo's evaluators and built-in `tool_*` ones `tool_definitions` from `{{sample.tool_definitions}}` |
 | Deterministic result | Copied from the agent run | `score_turn` on Foundry's reply and its tool calls |
 | Agent tokens and latency | In the agent run | Per turn, from the output item |
 
-Each evaluator is a criterion `{"type": "azure_ai_evaluator", "evaluator_name": "builtin.<name>"}` run with the `--judge`
-deployment, else `FOUNDRY_EVAL_JUDGE_DEPLOYMENT`, else `gpt-4-1-mini`. The defaults:
+Each evaluator is a criterion `{"type": "azure_ai_evaluator"}` run with the `--judge` deployment, else
+`FOUNDRY_EVAL_JUDGE_DEPLOYMENT`, else `gpt-4-1-mini`: `evaluator_name` `builtin.<name>` for a built-in evaluator, and
+for this repo's `toolbox_eval_<name>` at its catalog `evaluator_version`, with a threshold of 3. The defaults:
 
 | Evaluator | Scale | Fails a turn when |
 | --- | --- | --- |
-| `task_adherence` | 0 or 1 | the reply strays from the agent's instructions or the user's task |
-| `intent_resolution` | 1 to 5, passing from 3 | the reply doesn't resolve what the user wanted |
-| `tool_call_accuracy` | 1 to 5, passing from 3 | the turn's tool calls are wrong, incomplete or unneeded; it doesn't apply to a turn without tool calls |
+| `tool_use` (this repo's) | 1 to 5, passing from 3 | the turn misses a tool call the request needed, makes one it didn't need, or passes wrong arguments. A right call whose result is an error, such as no customer with that ID, counts as right; the reply isn't judged |
+| `grounded_adherence` (this repo's) | 1 to 5, passing from 3 | a fact in the reply comes from no tool result of this turn or an earlier one, or the reply strays from the agent's instructions, or it neither answers the request nor says plainly what isn't available |
+| `intent_resolution` (built-in) | 1 to 5, passing from 3 | the reply doesn't resolve what the user wanted |
+
+This repo's evaluators are prompt evaluators: a judge prompt (`evals/evaluators/tool_use.md` and
+`grounded_adherence.md`) gets the conversation, the turn's reply with its tool calls and results, and the agent's tool
+definitions, and answers with a reason, then a score. Before each run, the runner looks in the project's evaluator
+catalog (`<FOUNDRY_PROJECT_ENDPOINT>/evaluators/toolbox_eval_<name>/versions?api-version=v1`) for a version whose
+definition (the prompt, its inputs and its score) is the repo's, and registers a new version if none is. Registering
+is a preview feature, which a request opts in to with the header `Foundry-Features: Evaluations=V1Preview`. The
+evaluation names the version, so a changed prompt gets a new evaluation, and the runs of each prompt stay together. The
+run file keeps the versions (`evaluator_versions`) and nothing else from the catalog, whose replies also name the
+account, the project and who registered the version.
+
+They replace the defaults before them, the built-in `task_adherence` and `tool_call_accuracy`, which failed correct
+turns ([§13](#13-platform-behaviors-the-design-handles)). They see the earlier turns with their tool calls and results;
+`tool_use` counts a right call that returns an error as right; and `grounded_adherence` accepts a figure from an earlier
+turn's tool result but fails one the agent made up. `--evaluators task_adherence,intent_resolution,tool_call_accuracy`
+runs the old defaults.
+
+The prompts were calibrated on 11 synthetic turns built from real ones, each with an expected verdict per evaluator: a
+recalled figure, and the same figure made up, with chained and with replayed history; a made-up price after a tool
+error; a quote given without a call; a lookup of the wrong customer; a figure the user gave; a misspelled name with no
+retry; a redundant call; and a lookup by ID. The prompts in the repo matched every expected verdict on each of their
+last calibration runs, two or three per prompt. The judge, `gpt-4.1-mini`, needed two things: the reason before the
+score in its answer, or it sometimes scored against its own reasoning; and, for `tool_use`, the instruction to score
+the calls only, with a user's "don't look anything up" meaning no call is needed, or the reply's faults lowered the
+score. The judge varies from run to run, so check a changed prompt over several runs.
 
 The evaluation is named for its settings, `toolbox-eval-<source>-<hash of its definition>`, and later runs with the same
 settings reuse it, so the portal lists them together. The judge makes one call per evaluator and turn; when it shares a
@@ -859,11 +896,13 @@ A turn passes on `pass` or `skipped`, and the runner exits 0 only when every tur
 live CI runs it, only `error` and `not_judged` turns make it exit 1. `report.py cloud` sets each verdict against the
 same turn's deterministic result: how often the judge and the checks agree, and which turns only one of them failed.
 
-On the sample suite (November 2026, judge `gpt-4-1-mini`), the judge and the checks agreed on 9 of 12 turns of a
+On the sample suite (November 2026, judge `gpt-4-1-mini`), the old defaults agreed with the checks on 9 of 12 turns of a
 chained run, and every disagreement was a correct turn the judge failed: both tool-error turns on `tool_call_accuracy`,
 and the recall turn of `c-recall` on `task_adherence` ([§13](#13-platform-behaviors-the-design-handles)). Judging those
 12 turns took about 160 s and 93,000 judge tokens. With `--target`, 8 of the 10 first turns passed, with the same two
-disagreements.
+disagreements. The current defaults passed all 12 turns, in about 130 s and 81,000 judge tokens, and all 10 first
+turns with `--target`. On a replayed `c-recall` run, `grounded_adherence` failed the three replies that made up a
+contract value (score 2) and passed the three that said it wasn't available.
 
 ## 9. Authentication and configuration
 
@@ -1060,12 +1099,14 @@ Deploy steps and current findings: [getting-started.md](getting-started.md) and 
 | An MCP server starting from zero takes about 20 s, and the toolbox fails agent requests meanwhile (HTTP 400 `McpProtocolException`, protocol version `2026-07-28`) | The sample servers keep one replica (`--min-replicas 1`); the target reports such turns as `platform_abort` with `abort_reason` `tool_listing_failed` or `tool_call_failed` |
 | A request that continues a stored response (`previous_response_id`) without naming the agent fails with HTTP 400 "Missing required parameter: 'model'" | The target sends `agent_reference` on every request |
 | A conversation replayed as text carries no earlier tool results, and the agent may then state a figure no tool returned | Later turns continue the stored response by default (`history` `chain`); `c-recall` checks it |
-| Foundry's `tool_call_accuracy` rates a tool call that returns an error 2 of 5 ("no successful retry"), even when the error is the right answer, such as an unknown or privately held customer | Reported as a failure by the judge only, beside the passing checks (`c-private`, `c-unknown-customer`); `--evaluators` can leave the evaluator out |
-| `task_adherence` sees a chained conversation's earlier turns as text, without their tool results, so it fails a figure recalled from an earlier lookup as ungrounded | Reported as a failure by the judge only (`c-recall` turn 2) |
+| Foundry's `tool_call_accuracy` rates a tool call that returns an error 2 of 5 ("no successful retry"), even when the error is the right answer, such as an unknown or privately held customer | This repo's `tool_use`, which counts a right call that returns an error as right, replaced it as a default (`c-private`, `c-unknown-customer`) |
+| `task_adherence` sees a chained conversation's earlier turns as text, without their tool results, so it fails a figure recalled from an earlier lookup as ungrounded | This repo's `grounded_adherence`, which gets the earlier turns with their tool results (`{{item.query_history_list}}`), replaced it as a default (`c-recall` turn 2) |
 | Judged with `max_num_turns` 1, a chained later turn has no conversation or tool definitions, and `tool_call_accuracy` errors | `--max-turns` defaults to the run's longest conversation |
 | Foundry stores an assistant input message with plain-string content as `input_text`, and its evaluators then reject the conversation ("Invalid content type 'input_text' for message with role 'assistant'") | The target sends earlier replies as `output_text` content |
 | An evaluation run with an agent target sends one message per item and can't continue a conversation | `--target` judges first turns and lists the rest as left out |
 | Mapping `{{sample.tool_calls}}` to `tool_call_accuracy` makes it skip the turn: the field holds messages | Target runs map only `query`, `response` (`{{sample.output_items}}`) and `tool_definitions` |
+| Creating an evaluator version in the project's catalog is a preview feature: the request needs the header `Foundry-Features: Evaluations=V1Preview` | The runner sends it on every catalog request |
+| The evaluator catalog doesn't return the tags a version was created with, but returns its definition as sent | The runner finds the version to reuse by its definition |
 
 ## 14. Design decisions
 
@@ -1080,10 +1121,14 @@ Deploy steps and current findings: [getting-started.md](getting-started.md) and 
 - **Two agent scorers.** Deterministic checks give exact, cheap, repeatable regression signals. ASSERT covers behaviors
   that need judgment.
 - **Foundry's evaluators beside the checks, not instead of them.** They judge in the service, with no judge to host and
-  every run in the portal, but they rate general qualities and fail some correct turns
-  ([§13](#13-platform-behaviors-the-design-handles)), so each verdict is reported beside the same reply's deterministic
-  result. Judging stored responses is the default: the judge sees the very replies the checks scored, chained history
-  included, and the agent isn't called again.
+  every run in the portal, but they rate general qualities, and a judge can fail correct turns, as the built-in
+  `task_adherence` and `tool_call_accuracy` did ([§13](#13-platform-behaviors-the-design-handles)), so each verdict is
+  reported beside the same reply's deterministic result. Judging stored responses is the default: the judge sees the
+  very replies the checks scored, chained history included, and the agent isn't called again.
+- **This repo's evaluators in place of two built-in ones.** The built-in evaluators' prompts can't be changed, and no
+  setting stopped them failing correct tool errors and recalled figures, so two prompt evaluators judge tool use and
+  grounding instead. Their prompts live in the repo, so a change is reviewed like code; the runner registers them in the
+  project's catalog, a version per definition, so every evaluation names the prompt it ran.
 - **Validate first.** Bad cases stop a run before any Azure call. Exit codes are the same across runners, so CI can tell
   setup problems from test failures.
 - **Results are local JSON.** Reports and baseline diffs read those files; telemetry is optional and is not the record.
@@ -1107,8 +1152,8 @@ Deploy steps and current findings: [getting-started.md](getting-started.md) and 
   - `az` does the sign-in, so the runners' `AzureCliCredential` works unchanged.
   - Result files stay on the runner because they name the endpoint. The reports don't, so they go to the job summary.
   - Foundry's evaluators judge the agent evals' stored replies, but only turns they couldn't judge fail the job
-    (`--fail-on unjudged`). The judge fails some correct turns of the sample suite, so failing on its verdicts would
-    keep the job red; its verdicts are in the report.
+    (`--fail-on unjudged`). An LLM judge can fail correct turns, as the built-in evaluators did on the sample suite, so
+    failing on its verdicts would make the job flaky; its verdicts are in the report.
 
 ## 15. Extending
 
@@ -1119,6 +1164,7 @@ Deploy steps and current findings: [getting-started.md](getting-started.md) and 
 | Add agent scenarios | A JSONL file under `data/agent-evals/` |
 | Add an ASSERT behavior | A new config in `evals/configs/` (one behavior per config), run with `scripts/run_assert.py` |
 | Judge with other Foundry evaluators | `run_cloud_eval.py --evaluators` with built-in names (without `builtin.`); each set gets its own evaluation, and the report describes evaluators outside `CLOUD_REASONS` in general terms |
+| Add or change one of this repo's evaluators | A judge prompt `evals/evaluators/<name>.md` that uses `{{query}}`, `{{response}}` and `{{tool_definitions}}` and answers with a reason, then a score from 1 to 5; the name and its catalog description in `CUSTOM_EVALUATORS` in `evals/run_cloud_eval.py`, and its meaning in `CLOUD_REASONS`. The next run registers the new version. Check a changed prompt over several runs: the judge varies |
 | Add an assertion type | `$defs.assertion` in `schemas/tool-test.schema.json`, `ASSERTION_FIELDS` in `evals/cases.py`, `check()` in `tooltests/run.py`, plus unit tests |
 | Add a failure reason | `Failure("code", message)` in the runner, and the code's meaning in `TOOL_REASONS`, `AGENT_REASONS` or `CLOUD_REASONS` in `evals/reasons.py`; `tests/test_reasons.py` fails on undescribed codes |
 | Add a span attribute | `telemetry.span(...)` calls in the runners; document it in [telemetry.md](telemetry.md) |

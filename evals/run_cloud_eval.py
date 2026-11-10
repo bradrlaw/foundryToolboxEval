@@ -1,4 +1,4 @@
-"""Foundry cloud evaluation: Foundry's built-in evaluators judge the agent's replies, server side.
+"""Foundry cloud evaluation: evaluators in Foundry judge the agent's replies, server side.
 
 A third view next to the deterministic checks (evals/run_agent_evals.py) and ASSERT: the judge runs in Foundry, and
 each verdict is set against the deterministic checks of the same reply.
@@ -11,10 +11,20 @@ What it judges:
   the turn's deterministic checks score the same reply. Later turns are left out: a target run can't continue a
   conversation.
 
-Each turn gets the built-in evaluators in --evaluators (default task_adherence, intent_resolution and
-tool_call_accuracy), run with the --judge model deployment. A turn fails if an evaluator fails it and errors if one
-couldn't judge it; tool_call_accuracy doesn't apply to a turn without tool calls. With --target, evaluators named
-tool_* also get the agent's tool definitions.
+Each turn gets the evaluators in --evaluators, run with the --judge model deployment. The default is this repo's two
+evaluators and Foundry's built-in intent_resolution:
+- tool_use: whether the turn made the tool calls the request needed, with the right arguments. A right call whose
+  result is an error, such as no customer with that ID, counts as right; the reply isn't judged.
+- grounded_adherence: whether every fact in the reply comes from a tool result of this turn or an earlier one, and
+  the reply follows the agent's instructions and answers the request, or says plainly what isn't available.
+They see the earlier turns with their tool calls and results, and replace the built-in tool_call_accuracy and
+task_adherence, which failed correct replies to tool errors and figures recalled from an earlier turn. Their judge
+prompts are evals/evaluators/<name>.md. Each is registered in the project's evaluator catalog as toolbox_eval_<name>,
+with a new version when its prompt changes, and the evaluation uses that version. Built-in evaluators such as
+task_adherence can be named too.
+
+A turn fails if an evaluator fails it and errors if one couldn't judge it; tool_call_accuracy doesn't apply to a turn
+without tool calls. With --target, built-in evaluators named tool_* also get the agent's tool definitions.
 
 The evaluation is created in the project, named for its settings (toolbox-eval-<source>-<hash>), and reused by later
 runs with the same settings, so the portal lists their runs together. Results are written to
@@ -60,7 +70,29 @@ from evals.run_agent_evals import at_least_one, run_provenance, score_turn, summ
 AGENT_RUNS = ROOT / "results" / "agent-evals"
 DEFAULT_AGENT = "customer-assistant"
 DEFAULT_JUDGE = "gpt-4-1-mini"
-DEFAULT_EVALUATORS = ("task_adherence", "intent_resolution", "tool_call_accuracy")
+DEFAULT_EVALUATORS = ("grounded_adherence", "intent_resolution", "tool_use")
+# This repo's evaluators, with their catalog descriptions. Each judges a turn 1 to 5 with the prompt in
+# evals/evaluators/<name>.md and passes it from CUSTOM_THRESHOLD.
+CUSTOM_EVALUATORS = {
+    "tool_use": "Whether the turn made the tool calls the request needed, with the right arguments. A right call whose "
+                "result is an error counts as right; the reply isn't judged.",
+    "grounded_adherence": "Whether every fact in the reply comes from a tool result of this turn or an earlier one, "
+                          "and the reply follows the agent's instructions and answers the request.",
+}
+CUSTOM_PROMPTS = Path(__file__).resolve().parent / "evaluators"
+CUSTOM_THRESHOLD = 3
+CATALOG_PREFIX = "toolbox_eval_"
+# Creating an evaluator version is a preview feature that requests opt in to.
+CATALOG_HEADERS = {"Foundry-Features": "Evaluations=V1Preview"}
+_TEXT_OR_MESSAGES = {"anyOf": [{"type": "string"}, {"type": "array", "items": {"type": "object"}}]}
+# Where this repo's evaluators find their inputs. A stored response's query_history_list holds the agent's
+# instructions and the earlier turns with their tool calls and results, then the user's message.
+CUSTOM_MAPPINGS = {
+    "responses": {"query": "{{item.query_history_list}}", "response": "{{sample.output_items}}",
+                  "tool_definitions": "{{item.tool_definitions}}"},
+    "target": {"query": "{{item.query}}", "response": "{{sample.output_items}}",
+               "tool_definitions": "{{sample.tool_definitions}}"},
+}
 REQUEST_TIMEOUT_S = 120
 MAX_ATTEMPTS = 6
 # A POST the service may have processed isn't resent, so an evaluation run never starts twice.
@@ -113,20 +145,26 @@ def _id(status: int, data: dict) -> str:
 
 
 class EvalsAPI:
-    """The project's evaluation API: OpenAI-style evals under <project>/openai/v1."""
+    """The project's evaluation API: OpenAI-style evals under <project>/openai/v1, and the evaluator catalog under
+    <project>/evaluators."""
 
     def __init__(self, project: str):
-        self.base = project.rstrip("/") + "/openai/v1"
+        self.project = project.rstrip("/")
+        self.base = self.project + "/openai/v1"
 
     def call(self, method: str, path: str, body: dict | None = None) -> dict:
-        """Send a request and return its JSON. Throttling, transient HTTP errors and connection failures are retried,
-        and a GET also when the connection broke or timed out after it went out; a POST only when the service
-        surely didn't process it (RESEND_STATUSES, or no connection)."""
+        """Send a request and return its JSON: to the evaluator catalog if `path` starts with /evaluators/, else to
+        the evals API. Throttling, transient HTTP errors and connection failures are retried, and a GET also when the
+        connection broke or timed out after it went out; a POST only when the service surely didn't process it
+        (RESEND_STATUSES, or no connection)."""
         data = None if body is None else json.dumps(body).encode()
         statuses = RETRY_STATUSES if method == "GET" else RESEND_STATUSES
+        catalog = path.startswith("/evaluators/")
+        url = (self.project if catalog else self.base) + path
         for attempt in range(MAX_ATTEMPTS):
-            headers = {"Authorization": "Bearer " + auth.get_token(), "Content-Type": "application/json"}
-            req = urllib.request.Request(self.base + path, data=data, method=method, headers=headers)
+            headers = {"Authorization": "Bearer " + auth.get_token(), "Content-Type": "application/json",
+                       **(CATALOG_HEADERS if catalog else {})}
+            req = urllib.request.Request(url, data=data, method=method, headers=headers)
             try:
                 with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT_S) as resp:
                     return _json(resp.status, resp.read().decode(errors="replace"))
@@ -168,6 +206,26 @@ class EvalsAPI:
                 return found["id"], False
         return _id(201, self.call("POST", "/evals", definition)), True
 
+    def catalog_version(self, entry: dict) -> tuple[str, bool]:
+        """The version of catalog evaluator entry["name"] whose definition is entry["definition"], registered from
+        `entry` if no version has it; and whether it was registered. Only the version is kept: a version's other
+        fields name the account, the project and who registered it."""
+        path = f"/evaluators/{quote(entry['name'], safe='')}/versions"
+        page_path, seen = f"{path}?api-version=v1", set()
+        while page_path and page_path not in seen:
+            seen.add(page_path)
+            page = self.call("GET", page_path)
+            for found in map(_dict, page.get("value") or []):
+                if found.get("definition") == entry["definition"] and found.get("version"):
+                    return str(found["version"]), False
+            link = page.get("nextLink")
+            within = isinstance(link, str) and link.startswith(self.project + "/evaluators/")
+            page_path = link[len(self.project):] if within else None
+        version = self.call("POST", f"{path}?api-version=v1", entry).get("version")
+        if not version:
+            raise CloudEvalError(201, f"the evaluator catalog's reply has no version of {entry['name']}")
+        return str(version), True
+
     def start(self, eval_id: str, body: dict) -> str:
         """Start an evaluation run; returns its id."""
         return _id(201, self.call("POST", f"/evals/{quote(eval_id, safe='')}/runs", body))
@@ -195,13 +253,36 @@ class EvalsAPI:
         return self._pages(f"/evals/{quote(eval_id, safe='')}/runs/{quote(run_id, safe='')}/output_items")
 
 
-def criteria(evaluators: tuple[str, ...], judge: str, mapped: bool) -> list[dict]:
-    """Testing criteria for built-in evaluators. A target run's evaluators are told where their inputs are."""
+def custom_entry(name: str) -> dict:
+    """The catalog entry of this repo's evaluator `name`: its judge prompt, the inputs it takes and its score."""
+    prompt = (CUSTOM_PROMPTS / f"{name}.md").read_text(encoding="utf-8")
+    catalog_name = CATALOG_PREFIX + name
+    tools = {"anyOf": [{"type": "object"}, {"type": "array", "items": {"type": "object"}}]}
+    return {"name": catalog_name, "evaluator_type": "custom", "categories": ["quality"], "display_name": catalog_name,
+            "description": CUSTOM_EVALUATORS[name], "supported_evaluation_levels": ["turn"], "definition": {
+                "type": "prompt", "prompt_text": prompt,
+                "init_parameters": {"type": "object", "required": ["deployment_name", "threshold"], "properties": {
+                    "deployment_name": {"type": "string"}, "threshold": {"type": "number"}}},
+                "data_schema": {"type": "object", "required": ["query", "response"], "properties": {
+                    "query": _TEXT_OR_MESSAGES, "response": _TEXT_OR_MESSAGES, "tool_definitions": tools}},
+                "metrics": {catalog_name: {"type": "ordinal", "desirable_direction": "increase", "min_value": 1,
+                                           "max_value": 5}}}}
+
+
+def criteria(evaluators: tuple[str, ...], judge: str, source: str, versions: dict[str, str]) -> list[dict]:
+    """Testing criteria: this repo's evaluators at their catalog `versions`, told where their inputs are, and
+    built-in ones, told so in a target run."""
     out = []
     for name in evaluators:
+        if name in CUSTOM_EVALUATORS:
+            out.append({"type": "azure_ai_evaluator", "name": name, "evaluator_name": CATALOG_PREFIX + name,
+                        "evaluator_version": versions[name],
+                        "initialization_parameters": {"deployment_name": judge, "threshold": CUSTOM_THRESHOLD},
+                        "data_mapping": dict(CUSTOM_MAPPINGS[source])})
+            continue
         c = {"type": "azure_ai_evaluator", "name": name, "evaluator_name": f"builtin.{name}",
              "initialization_parameters": {"deployment_name": judge}}
-        if mapped:
+        if source == "target":
             # Not sample.tool_calls: it holds messages, which makes tool_call_accuracy skip the turn. The evaluator
             # finds the calls in the response.
             c["data_mapping"] = {"query": "{{item.query}}", "response": "{{sample.output_items}}"}
@@ -211,14 +292,16 @@ def criteria(evaluators: tuple[str, ...], judge: str, mapped: bool) -> list[dict
     return out
 
 
-def eval_definition(source: str, evaluators: tuple[str, ...], judge: str) -> dict:
-    """The evaluation that judges a source (responses or target), named for its settings."""
+def eval_definition(source: str, evaluators: tuple[str, ...], judge: str,
+                    versions: dict[str, str] | None = None) -> dict:
+    """The evaluation that judges a source (responses or target), with this repo's evaluators at their catalog
+    `versions`; named for its settings."""
+    tests = criteria(evaluators, judge, source, versions or {})
     if source == "responses":
-        body = {"data_source_config": {"type": "azure_ai_source", "scenario": "responses"},
-                "testing_criteria": criteria(evaluators, judge, mapped=False)}
+        body = {"data_source_config": {"type": "azure_ai_source", "scenario": "responses"}, "testing_criteria": tests}
     else:
         body = {"data_source_config": {"type": "custom", "include_sample_schema": True, "item_schema": ITEM_SCHEMA},
-                "testing_criteria": criteria(evaluators, judge, mapped=True)}
+                "testing_criteria": tests}
     digest = hashlib.sha256(json.dumps(body, sort_keys=True).encode()).hexdigest()[:8]
     return {"name": f"toolbox-eval-{source}-{digest}", **body}
 
@@ -434,7 +517,7 @@ def agreement_line(results: list[dict]) -> str | None:
 def evaluator_list(text: str) -> tuple[str, ...]:
     names = [n.strip().removeprefix("builtin.") for n in text.split(",") if n.strip()]
     if not names or not all(re.fullmatch(r"[a-z][a-z0-9_]*", n) for n in names):
-        raise argparse.ArgumentTypeError(f"expected built-in evaluator names such as task_adherence, not {text!r}")
+        raise argparse.ArgumentTypeError(f"expected evaluator names such as tool_use or task_adherence, not {text!r}")
     return tuple(dict.fromkeys(names))
 
 
@@ -460,7 +543,7 @@ def _setup_error(message: str) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(description="Have Foundry's built-in evaluators judge the agent's replies.")
+    ap = argparse.ArgumentParser(description="Have evaluators in Foundry judge the agent's replies.")
     ap.add_argument("run", nargs="?", type=Path,
                     help="agent-eval run whose stored responses to judge (default: the newest in results/agent-evals)")
     ap.add_argument("--target", nargs="+", metavar="CASES",
@@ -471,7 +554,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--judge", help="model deployment the evaluators use (default: $FOUNDRY_EVAL_JUDGE_DEPLOYMENT, "
                                     "else gpt-4-1-mini)")
     ap.add_argument("--evaluators", type=evaluator_list, default=DEFAULT_EVALUATORS, metavar="NAMES",
-                    help="comma-separated built-in evaluators (default: " + ",".join(DEFAULT_EVALUATORS) + ")")
+                    help="comma-separated evaluators: this repo's (" + ", ".join(CUSTOM_EVALUATORS) + ") or built-in "
+                         "ones such as task_adherence (default: " + ",".join(DEFAULT_EVALUATORS) + ")")
     ap.add_argument("--max-turns", type=at_least_one, metavar="N",
                     help="turns of each response's conversation the evaluators see, the judged turn included "
                          "(default: the run's longest conversation)")
@@ -546,8 +630,13 @@ def main(argv: list[str] | None = None) -> int:
     print(f"Evaluators: {', '.join(args.evaluators)} (judge {judge})")
 
     api = EvalsAPI(project)
-    definition = eval_definition(source, args.evaluators, judge)
     try:
+        versions = {}
+        for name in (n for n in args.evaluators if n in CUSTOM_EVALUATORS):
+            versions[name], registered = api.catalog_version(custom_entry(name))
+            print(f"  {name}: {CATALOG_PREFIX}{name} version {versions[name]} in the project's evaluator catalog"
+                  + (" (registered now)" if registered else ""))
+        definition = eval_definition(source, args.evaluators, judge, versions)
         eval_id, created = api.eval_id(definition)
         began = time.monotonic()
         run_id = api.start(eval_id, body)
@@ -592,8 +681,8 @@ def main(argv: list[str] | None = None) -> int:
 
     out = write_run(args.out, lambda stamp: {
         "kind": "cloud", "timestamp": stamp, "source": source, "agent_name": agent, **where, "judge": judge,
-        "evaluators": list(args.evaluators), "eval_name": definition["name"], "eval_id": eval_id,
-        "eval_run_id": run_id, "status": run.get("status"), "duration_s": duration_s,
+        "evaluators": list(args.evaluators), "evaluator_versions": versions, "eval_name": definition["name"],
+        "eval_id": eval_id, "eval_run_id": run_id, "status": run.get("status"), "duration_s": duration_s,
         "result_counts": run.get("result_counts"), "judge_usage": used, "agent_usage": agent_usage,
         "provenance": ran, "report_url": run.get("report_url"), "results": results})
     print(f"results: {out}")
