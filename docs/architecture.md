@@ -15,15 +15,19 @@ The repo tests a toolbox at two levels. *Tests* call the toolbox directly; *eval
 | Tool tests | `python -m tooltests.run` | Toolbox MCP endpoint (Streamable HTTP, JSON-RPC) | Tool listing and definitions, results (assertions), error outcomes, auth status codes, latency | `results/tool-tests/run-*.json` |
 | Agent evals, deterministic | `python -m evals.run_agent_evals` | Prompt agent through the Responses API | Expected tool calls and arguments (optionally ordered), forbidden calls, response regexes, latency | `results/agent-evals/run-*.json` |
 | Agent evals, ASSERT | `python scripts/run_assert.py <config>` | `assert-ai`, which drives the agent through `evals/foundry_agent/target.py` and judges it with an LLM | Violation rate for one behavior per config (for example ungrounded figures, raw error replies) | `results/assert/results/<suite>/<run>/` |
+| Agent evals, Foundry evaluators | `python -m evals.run_cloud_eval` | Foundry's evaluation service, which judges an agent run's stored responses, or calls the agent itself (`--target`) | Built-in LLM evaluators (task adherence, intent resolution, tool-call accuracy) per turn, and how often they agree with the deterministic checks | `results/cloud-evals/run-*.json` |
 
-The two agent-eval paths complement each other:
+The agent-eval paths complement each other:
 
-- The deterministic runner checks exact calls and parameters, which ASSERT does not.
-- ASSERT judges open-ended behavior, which regexes cannot.
-- Both call the agent through the same target code, so a platform quirk shows up the same way in each.
+- The deterministic runner checks exact calls and parameters, which the judges do not.
+- ASSERT judges open-ended behavior, which regexes cannot, with test cases it generates for one behavior at a time.
+- Foundry's built-in evaluators judge the same turns the deterministic runner scored, server-side, with no judge to host.
+  They rate general qualities rather than one behavior, so the report compares their verdicts with the checks.
+- The deterministic runner and ASSERT call the agent through the same target code, so a platform quirk shows up the
+  same way in each.
 
-Both paths also work with toolboxes whose connections pass the signed-in user's identity to the MCP server; see
-[entra.md](entra.md).
+The deterministic and ASSERT paths also work with toolboxes whose connections pass the signed-in user's identity to the
+MCP server; see [entra.md](entra.md).
 
 ## 2. System context
 
@@ -35,6 +39,7 @@ flowchart TB
         tt["Tool-test runner<br/>tooltests/run.py"]
         ae["Agent-eval runner<br/>evals/run_agent_evals.py"]
         aa["ASSERT (assert-ai)<br/>via scripts/run_assert.py"]
+        ce["Cloud-eval runner<br/>evals/run_cloud_eval.py"]
         tg["Agent target<br/>evals/foundry_agent/target.py"]
         res[("results/<br/>read by scripts/report.py")]
     end
@@ -42,14 +47,15 @@ flowchart TB
     subgraph foundry["Microsoft Foundry"]
         agent["Prompt agent<br/>Responses API"]
         tb["Toolbox<br/>MCP endpoint"]
-        models["Model deployments<br/>agent model, ASSERT models"]
+        evs["Evaluation service<br/>/openai/v1/evals"]
+        models["Model deployments<br/>agent model, ASSERT models,<br/>evaluator judge"]
     end
 
     mcp["MCP server<br/>sample: Azure Container Apps,<br/>no auth or Entra-protected"]
     entra["Microsoft Entra ID"]
     appi[("Application Insights<br/>optional")]
 
-    dev --> tt & ae & aa
+    dev --> tt & ae & aa & ce
     ae -->|"run_agent"| tg
     aa -->|"chat"| tg
     tt -->|"MCP: tools/list, tools/call"| tb
@@ -57,8 +63,11 @@ flowchart TB
     agent -->|"model calls"| models
     agent -->|"MCP"| tb
     aa -->|"LLM calls"| models
+    ce -->|"create an eval and a run,<br/>poll, read output items"| evs
+    evs -->|"read stored responses,<br/>or call the agent"| agent
+    evs -->|"judge calls"| models
     tb -->|"MCP, via a project connection:<br/>no auth, or the user's own token (OAuth2)"| mcp
-    tt & ae & aa --> res
+    tt & ae & aa & ce --> res
     repo -.->|"tokens from az login"| entra
     tb -.->|"OAuth2 connection:<br/>per-user consent and refresh"| entra
     repo -.->|"spans"| appi
@@ -77,6 +86,7 @@ flowchart TB
         val["scripts/validate_eval_jsonl.py"]
         run["tooltests/run.py"]
         rae["evals/run_agent_evals.py"]
+        rce["evals/run_cloud_eval.py"]
         rass["scripts/run_assert.py"]
         rep["scripts/report.py"]
         dep["scripts/deploy_toolbox.py<br/>scripts/deploy_agent.py<br/>scripts/setup_entra.py"]
@@ -89,6 +99,7 @@ flowchart TB
         reasons["reasons.py<br/>failure reason codes"]
         runfiles["results.py<br/>run files"]
         prov["provenance.py<br/>commit, agent and toolbox versions"]
+        retry["retry.py<br/>retryable statuses and waits"]
     end
     mcpsdk["mcp SDK client"]
     assertai["assert-ai"]
@@ -107,13 +118,17 @@ flowchart TB
     rae --> common
     target --> common
     target --> terr
+    rce --> cases
+    rce --> common
+    rce -->|"score_turn, run provenance"| rae
+    target & rce --> retry
     rass --> configs
     rass --> assertai
     assertai -->|"imports target:chat"| target
     cases --> files
     rep --> results
-    run & rae & rep --> reasons
-    run & rae --> runfiles
+    run & rae & rce & rep --> reasons
+    run & rae & rce --> runfiles
     run & rae --> prov
     prov --> common
     runfiles --> results
@@ -124,16 +139,18 @@ flowchart TB
 | --- | --- |
 | `tooltests/run.py` | MCP client for the toolbox: one session per run, outcome classification, assertions, latency percentiles, reconnects |
 | `evals/run_agent_evals.py` | Runs multi-turn conversations against the agent, each later turn continuing the previous turn's stored response (or replaying the text), optionally several times over, and scores every turn |
+| `evals/run_cloud_eval.py` | Has Foundry's evaluation service judge the agent with built-in evaluators: creates or reuses an evaluation, runs it over an agent run's stored responses or, with `--target`, over the first turns of case files, polls the run, and turns each output item into a verdict per turn beside that turn's deterministic result |
 | `evals/foundry_agent/target.py` | Calls the agent through the Responses API with retries, continuing a stored response when given one, reads `mcp_call` and `message` output items, detects platform aborts and turns the agent never ran (`abort_reason`), and emits agent and tool spans. Its `chat()` is ASSERT's callable target: it continues the stored response behind a transcript and logs what served each call |
 | `evals/cases.py` | Finds, parses and validates JSONL cases (JSON Schema plus cross-field and cross-file rules), and fills `{{caller.*}}` placeholders |
 | `evals/auth.py` | Entra tokens from `az login`, cached per scope and refreshed 5 minutes before expiry; the signed-in user's claims for placeholders |
 | `evals/toolbox_errors.py` | Recognizes toolbox errors caused by a tool source (consent needed, or the source failed) and prints consent links to the console, the only place they appear |
-| `evals/reasons.py` | Failure reason codes and what each means, shared by both runners and `report.py` |
-| `evals/results.py` | Writes each run of either runner to a new `run-<UTC timestamp>.json`; a run finishing in the same second as another waits for the next second, so no run overwrites another and names sort in run order. Also groups a repeated run's results by turn for pass rates, flaky turns and extra calls |
+| `evals/reasons.py` | Failure reason codes and what each means, shared by the runners and `report.py` |
+| `evals/results.py` | Writes each run of any runner to a new `run-<UTC timestamp>.json`; a run finishing in the same second as another waits for the next second, so no run overwrites another and names sort in run order. Also groups a repeated run's results by turn for pass rates, flaky turns and extra calls, and tallies cloud verdicts per evaluator and how the judge agrees with the checks |
+| `evals/retry.py` | The HTTP statuses worth retrying and the wait before each retry (`Retry-After`, up to 60 s, else 5, 10, 20, 30 s), shared by the target and the cloud-eval runner |
 | `evals/provenance.py` | Records what a run ran against: the commit and whether the working tree had changes, each toolbox's default version, and for agent runs the agent version and its model. Versions come only from `FOUNDRY_PROJECT_ENDPOINT`; what can't be read is null, and a failed lookup never fails a run |
 | `evals/telemetry.py` | `span()` helper and the optional App Insights exporter; does nothing without a connection string |
 | `scripts/run_assert.py` | Runs `assert-ai run` from the repo root with artifacts under `results/assert`, and writes the run's `provenance.json` |
-| `scripts/report.py` | Markdown reports and baseline diffs for all three result types: pass rates, failures grouped by reason, what tool and agent runs ran against and what of that changed, ASSERT violations with the judge's justifications and the errors of cases it couldn't score |
+| `scripts/report.py` | Markdown reports and baseline diffs for tool, agent, cloud and ASSERT runs: pass rates, failures grouped by reason, what tool, agent and cloud runs ran against and what of that changed, cloud verdicts per evaluator and how the judge agrees with the checks, ASSERT violations with the judge's justifications and the errors of cases it couldn't score |
 | `scripts/validate_eval_jsonl.py` | Validates case files without running them |
 | `scripts/deploy_toolbox.py`, `deploy_agent.py`, `_az.py` | Create the connection (no auth, OAuth2 or UserEntraToken), toolbox version and agent version through `az rest`; for OAuth2, also the client secret and redirect URI on the client app |
 | `scripts/setup_entra.py` | Registers the Entra apps for the Entra sample through Microsoft Graph: the API app (scope, app roles, your role assignments) and the OAuth client app |
@@ -308,10 +325,51 @@ classDiagram
         +list~object~ tool_calls
         +string response
     }
+    class CloudRun {
+        +string kind
+        +string timestamp
+        +string source
+        +string agent_run
+        +list~string~ cases
+        +list~string~ left_out
+        +string agent_name
+        +string history
+        +int max_turns
+        +string judge
+        +list~string~ evaluators
+        +string eval_name
+        +string eval_id
+        +string eval_run_id
+        +string status
+        +int duration_s
+        +object result_counts
+        +object judge_usage
+        +object agent_usage
+        +Provenance provenance
+        +list~CloudResult~ results
+    }
+    class CloudResult {
+        +string conversation_id
+        +int turn_number
+        +string category
+        +string verdict
+        +bool passed
+        +list~string~ failures
+        +list~string~ reasons
+        +object scores
+        +object deterministic
+        +string response_id
+        +float latency_ms
+        +object usage
+        +list~object~ tool_calls
+        +string response
+    }
     ToolRun "1" *-- "1..*" ToolResult : results
     AgentRun "1" *-- "1..*" AgentResult : results
+    CloudRun "1" *-- "1..*" CloudResult : results
     ToolRun "1" *-- "1" Provenance : provenance
     AgentRun "1" *-- "1" Provenance : provenance
+    CloudRun "1" *-- "1" Provenance : provenance
 ```
 
 - `outcomes` counts outcomes across repetitions.
@@ -337,6 +395,17 @@ classDiagram
 - `history` is how later turns carried the conversation, `chain` or `replay` ([Multi-turn
   conversations](#multi-turn-conversations)); agent runs recorded before it existed replayed text. A result's
   `previous_response_id` is the stored response the turn continued, null for a first turn and when replaying.
+- A cloud run's `source` is `responses` or `target` ([§8](#8-foundry-evaluators)). A `responses` run judged the stored
+  responses of the agent run `agent_run`, the evaluators seeing up to `max_turns` turns of each conversation; it keeps
+  that run's `history` and `provenance`, since that run produced the replies. A `target` run had Foundry call
+  `agent_name` with the first turn of each conversation in `cases`, lists the later turns it left out in `left_out`, and
+  reads `provenance` after the run.
+- A cloud result's `verdict` is `pass`, `fail`, `error`, `skipped` or `not_judged`, and `passed` is true for `pass`
+  and `skipped`. `scores` holds each evaluator's `status`, `score`, `label`, `threshold`, `passed` and `reason`.
+  `deterministic` (`passed`, `failures`, `reasons`) is the same turn's checks: copied from the agent run, or run on
+  Foundry's reply for a `target` run. `judge_usage` sums the judge's tokens. `agent_usage` (null for a `responses` run)
+    sums the agent's, and only `target` results have `latency_ms` and `usage`. `report_url` links to the run in the
+    portal and names the project.
 - `report.py` matches results to a baseline by `case_id`, or by conversation and turn, and lists what the run ran
   against that differs from the baseline's. An unknown version doesn't count as a change. A turn that ran several times
   counts once: it passed only if every run passed, its latency is the median over its runs, and a failure that recurs
@@ -387,7 +456,7 @@ sequenceDiagram
   counts toward a call's latency.
 - `auth` cases use a separate HTTP client, because the MCP session cannot send a bad token.
 - Every request carries a W3C `traceparent` header, so the toolbox's own spans join the case's trace
-  ([§9](#9-telemetry)).
+  ([§10](#10-telemetry)).
 
 ### Outcomes
 
@@ -521,7 +590,7 @@ turns fail before any check runs, so a check like `must_not_call` can't pass on 
 When the toolbox can't make the call the model chose, the service fails the whole call with HTTP 400
 `McpProtocolException encountered while invoking tool`. The target reports `platform_abort` with `abort_reason`
 `tool_call_failed`, the tool name parsed from the error and no arguments. This and a listing failure are what the first
-requests get while an MCP server that scaled to zero is starting ([§12](#12-platform-behaviors-the-design-handles)).
+requests get while an MCP server that scaled to zero is starting ([§13](#13-platform-behaviors-the-design-handles)).
 
 ### Retries
 
@@ -611,7 +680,9 @@ flowchart TD
   `response_id` is added as text instead.
 - `replay`: every request sends the conversation as text, every user message plus the replies received so far. Earlier
   tool results are not sent, so the agent has to call the tools again for data it fetched before, or answers without
-  it. Runs recorded before chaining existed replayed.
+  it. Runs recorded before chaining existed replayed. Each earlier reply goes as an assistant message with
+  `output_text` content: Foundry stores a plain-string reply as `input_text`, which its evaluators reject
+  ([§8](#8-foundry-evaluators)).
 
 The sample suite's `c-recall` tells them apart: turn 1 looks up Contoso, and turn 2 asks, without a new lookup, for its
 contract value, which only the earlier tool result holds. Chained, the agent quoted the record's 1,250,000 USD in 4 of 4
@@ -720,7 +791,80 @@ sequenceDiagram
     Note over I: the judge reads transcripts with their tool spans,<br/>so it can check each stated figure against tool output
 ```
 
-## 8. Authentication and configuration
+## 8. Foundry evaluators
+
+`evals/run_cloud_eval.py` has Foundry's evaluation service judge the agent with its built-in evaluators, through the
+project's OpenAI-compatible evals API (`<FOUNDRY_PROJECT_ENDPOINT>/openai/v1/evals`, no `api-version`). The judging runs
+in Foundry; the runner creates or reuses an evaluation, starts a run, waits for it and reads its output items.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant R as run_cloud_eval.py
+    participant E as Evals API
+    participant A as Agent, Responses API
+    participant J as Judge deployment
+    R->>E: GET /evals: is there an evaluation named for these settings?
+    opt none yet
+        R->>E: POST /evals: data source config, one criterion per evaluator
+    end
+    R->>E: POST /evals/{id}/runs: the response ids, or the first turns and the agent
+    par Foundry runs the evaluation
+        E->>A: read each stored response, or send each first turn
+        E->>J: one call per evaluator and turn
+    and the runner waits
+        loop until completed, failed or canceled, at most --timeout
+            R->>E: GET /evals/{id}/runs/{run}
+        end
+    end
+    R->>E: GET /evals/{id}/runs/{run}/output_items
+    R->>R: a verdict per turn, beside the turn's deterministic result
+```
+
+| | Stored responses (default) | `--target CASES` |
+| --- | --- | --- |
+| What is judged | Each turn of an agent run (the one given, else the newest), read by its `response_id`; the agent isn't called again | Foundry's own call to the agent (`--agent`) with the first turn of each conversation |
+| What the evaluators see | Up to `--max-turns` turns of the conversation, the judged one included (default: the run's longest conversation); a chained run's earlier turns come with their tool calls and results | That turn only. Later turns are left out, because a target run can't continue a conversation |
+| Data source | Evaluation: `azure_ai_source`, scenario `responses`. Run: `azure_ai_responses`, retrieving each response with `max_num_turns` | Evaluation: a `custom` item schema (`query`, `case`) plus the sample schema. Run: `azure_ai_target_completions`, sending `{{item.query}}` to an `azure_ai_agent` target |
+| Evaluator inputs | Found by the service | `query` from `{{item.query}}`, `response` from `{{sample.output_items}}`, and for `tool_*` evaluators `tool_definitions` from `{{sample.tool_definitions}}` |
+| Deterministic result | Copied from the agent run | `score_turn` on Foundry's reply and its tool calls |
+| Agent tokens and latency | In the agent run | Per turn, from the output item |
+
+Each evaluator is a criterion `{"type": "azure_ai_evaluator", "evaluator_name": "builtin.<name>"}` run with the `--judge`
+deployment, else `FOUNDRY_EVAL_JUDGE_DEPLOYMENT`, else `gpt-4-1-mini`. The defaults:
+
+| Evaluator | Scale | Fails a turn when |
+| --- | --- | --- |
+| `task_adherence` | 0 or 1 | the reply strays from the agent's instructions or the user's task |
+| `intent_resolution` | 1 to 5, passing from 3 | the reply doesn't resolve what the user wanted |
+| `tool_call_accuracy` | 1 to 5, passing from 3 | the turn's tool calls are wrong, incomplete or unneeded; it doesn't apply to a turn without tool calls |
+
+The evaluation is named for its settings, `toolbox-eval-<source>-<hash of its definition>`, and later runs with the same
+settings reuse it, so the portal lists them together. The judge makes one call per evaluator and turn; when it shares a
+model deployment with the agent, the two share its rate limit, so run one job at a time. Each turn gets the first of
+these verdicts that applies:
+
+1. `not_judged`: the turn has no stored response, the run returned no output item for it, or the service couldn't read
+   its stored response.
+2. `error`, reason `agent_error`: Foundry's call to the agent failed (`--target`).
+3. `fail`: an evaluator failed the turn. Each such evaluator is a reason; evaluators that couldn't judge the turn are
+   listed too, as `evaluator_error`.
+4. `error`, reason `evaluator_error`: an evaluator couldn't judge the turn.
+5. `pass`: an evaluator passed it.
+6. `skipped`: every evaluator found itself not applicable.
+7. `not_judged`: no evaluator returned a result.
+
+A turn passes on `pass` or `skipped`, and the runner exits 0 only when every turn passed. `report.py cloud` sets each
+verdict against the same turn's deterministic result: how often the judge and the checks agree, and which turns only
+one of them failed.
+
+On the sample suite (November 2026, judge `gpt-4-1-mini`), the judge and the checks agreed on 9 of 12 turns of a
+chained run, and every disagreement was a correct turn the judge failed: both tool-error turns on `tool_call_accuracy`,
+and the recall turn of `c-recall` on `task_adherence` ([§13](#13-platform-behaviors-the-design-handles)). Judging those
+12 turns took about 160 s and 93,000 judge tokens. With `--target`, 8 of the 10 first turns passed, with the same two
+disagreements.
+
+## 9. Authentication and configuration
 
 ### Tokens
 
@@ -767,7 +911,8 @@ root, and `run_assert.py` runs ASSERT from the repo root so it loads the same fi
 | --- | --- | --- |
 | `FOUNDRY_PROJECT_ENDPOINT` | Target, deploy scripts, tool runner (default endpoint) | `https://<resource>.services.ai.azure.com/api/projects/<project>` |
 | `FOUNDRY_TOOLBOX_NAME` | Tool runner, deploy scripts | Toolbox name, default `sample-customer-toolbox` |
-| `FOUNDRY_AGENT_NAME` | Target, `deploy_agent.py` | Agent name, default `customer-assistant` |
+| `FOUNDRY_AGENT_NAME` | Target, `deploy_agent.py`, `run_cloud_eval.py --target` | Agent name, default `customer-assistant` |
+| `FOUNDRY_EVAL_JUDGE_DEPLOYMENT` | `run_cloud_eval.py` | Model deployment that Foundry's evaluators judge with, default `gpt-4-1-mini` |
 | `AZURE_API_BASE`, `ASSERT_AZURE_USE_AAD` | assert-ai | Endpoint and Entra auth for ASSERT's models |
 | `APPLICATIONINSIGHTS_CONNECTION_STRING` | `evals/telemetry.py` | Turns on span export |
 | `APPLICATIONINSIGHTS_USE_AAD` | `evals/telemetry.py` | Entra auth for ingestion |
@@ -776,7 +921,7 @@ root, and `run_assert.py` runs ASSERT from the repo root so it loads the same fi
 | `ENTRA_TENANT_ID`, `ENTRA_API_APP_ID` | `setup_entra.py` (writes), `deploy_toolbox.py`; the Entra sample server as Container App settings | The Entra sample's tenant and API app |
 | `ENTRA_OAUTH_CLIENT_APP_ID` | `setup_entra.py` (writes), `deploy_toolbox.py --auth-type OAuth2` | The OAuth client app for identity passthrough |
 
-## 9. Telemetry
+## 10. Telemetry
 
 `telemetry.init` always installs an OpenTelemetry tracer provider, so spans exist in-process; ASSERT's collector reads the
 target's spans from it. Spans are exported only when `APPLICATIONINSIGHTS_CONNECTION_STRING` is set.
@@ -821,7 +966,7 @@ ignores the MCP SDK's `params._meta` copy; so a tool-test case's trace also reac
 `eval.platform_abort` and `eval.abort_reason`, and the agent version and tokens the response reports
 (`gen_ai.agent.version`, `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens`); consent links never reach a span.
 
-## 10. Reliability
+## 11. Reliability
 
 | Layer | Failure | Handling |
 | --- | --- | --- |
@@ -833,15 +978,19 @@ ignores the MCP SDK's `params._meta` copy; so a tool-test case's trace also reac
 | Agent target | Consent needed, or the agent's tools can't be listed | Not retried; the turn fails as not run, and ASSERT records a target error |
 | Agent target | Read timeout (180 s) | Not retried; the turn fails |
 | Agent-eval runner | Any exception in a turn | The turn fails with a runner error; the run continues |
+| Cloud-eval runner, evals API | HTTP 408, 429, 5xx, connection errors, read timeouts (120 s) | A GET gets up to 6 attempts, waiting as the agent target does. A POST is resent only on 408, 429 or a request that never got through, so an evaluation or a run is never created twice |
+| Cloud-eval runner, evaluation run | The run fails, is canceled or outlasts `--timeout` (30 minutes) | Setup error, exit 2; the run's error and id go to the console |
 | Deploy scripts (`_az.rest`) | DNS, connection, 429, 502, 503, 504, and Graph replication delays | 6 attempts, waiting 10, 20, 30, 40, 50 s. A POST is retried only when it can't have been applied (DNS or connect failure, 429, replication delay), so a lost response can't create a second app, version or secret |
 | ASSERT | Interrupted run | Completed stages are cached and reused |
 
 Both runners exit 0 when every case passes, 1 when any fails, and 2 on a setup problem: invalid cases, a missing endpoint
 or config, or no sign-in. Only the tool runner's first connection is part of setup, so there a connection failure or a
 tool source that needs consent exits 2; the agent runner fails the affected turns and runs the rest.
+`run_cloud_eval.py` exits 0 when every turn passed, 1 when one failed, errored or wasn't judged, and 2 on a setup
+error, an error from the evals API, or an evaluation run that failed, was canceled or didn't end in time.
 `scripts/run_assert.py` exits 2 on usage errors and otherwise returns ASSERT's exit code.
 
-## 11. Sample deployment
+## 12. Sample deployment
 
 ```mermaid
 flowchart LR
@@ -891,7 +1040,7 @@ aborted the whole agent request).
 
 Deploy steps and current findings: [getting-started.md](getting-started.md) and [deploy/README.md](../deploy/README.md).
 
-## 12. Platform behaviors the design handles
+## 13. Platform behaviors the design handles
 
 | Behavior | How the repo handles it |
 | --- | --- |
@@ -909,19 +1058,30 @@ Deploy steps and current findings: [getting-started.md](getting-started.md) and 
 | An MCP server starting from zero takes about 20 s, and the toolbox fails agent requests meanwhile (HTTP 400 `McpProtocolException`, protocol version `2026-07-28`) | The sample servers keep one replica (`--min-replicas 1`); the target reports such turns as `platform_abort` with `abort_reason` `tool_listing_failed` or `tool_call_failed` |
 | A request that continues a stored response (`previous_response_id`) without naming the agent fails with HTTP 400 "Missing required parameter: 'model'" | The target sends `agent_reference` on every request |
 | A conversation replayed as text carries no earlier tool results, and the agent may then state a figure no tool returned | Later turns continue the stored response by default (`history` `chain`); `c-recall` checks it |
+| Foundry's `tool_call_accuracy` rates a tool call that returns an error 2 of 5 ("no successful retry"), even when the error is the right answer, such as an unknown or privately held customer | Reported as a failure by the judge only, beside the passing checks (`c-private`, `c-unknown-customer`); `--evaluators` can leave the evaluator out |
+| `task_adherence` sees a chained conversation's earlier turns as text, without their tool results, so it fails a figure recalled from an earlier lookup as ungrounded | Reported as a failure by the judge only (`c-recall` turn 2) |
+| Judged with `max_num_turns` 1, a chained later turn has no conversation or tool definitions, and `tool_call_accuracy` errors | `--max-turns` defaults to the run's longest conversation |
+| Foundry stores an assistant input message with plain-string content as `input_text`, and its evaluators then reject the conversation ("Invalid content type 'input_text' for message with role 'assistant'") | The target sends earlier replies as `output_text` content |
+| An evaluation run with an agent target sends one message per item and can't continue a conversation | `--target` judges first turns and lists the rest as left out |
+| Mapping `{{sample.tool_calls}}` to `tool_call_accuracy` makes it skip the turn: the field holds messages | Target runs map only `query`, `response` (`{{sample.output_items}}`) and `tool_definitions` |
 
-## 13. Design decisions
+## 14. Design decisions
 
 - **Tests vs. evals.**
   - Tool tests isolate the toolbox, so a failure points at the toolbox or the MCP server rather than at the model.
   - Agent evals measure what users get.
 - **REST instead of the Foundry SDK.** `azure-ai-projects` requires `openai>=3`, which conflicts with assert-ai's
-  `openai<3` pin, so the target calls the Responses API with `urllib`.
+  `openai<3` pin, so the target and the cloud-eval runner call the Responses and evals APIs with `urllib`.
 - **The official `mcp` client.**
   - The tool runner uses the same protocol stack as real MCP clients, with one session per run.
   - It has no HTTP read timeout; each request is bounded by an MCP request timeout instead.
 - **Two agent scorers.** Deterministic checks give exact, cheap, repeatable regression signals. ASSERT covers behaviors
   that need judgment.
+- **Foundry's evaluators beside the checks, not instead of them.** They judge in the service, with no judge to host and
+  every run in the portal, but they rate general qualities and fail some correct turns
+  ([§13](#13-platform-behaviors-the-design-handles)), so each verdict is reported beside the same reply's deterministic
+  result. Judging stored responses is the default: the judge sees the very replies the checks scored, chained history
+  included, and the agent isn't called again.
 - **Validate first.** Bad cases stop a run before any Azure call. Exit codes are the same across runners, so CI can tell
   setup problems from test failures.
 - **Results are local JSON.** Reports and baseline diffs read those files; telemetry is optional and is not the record.
@@ -945,7 +1105,7 @@ Deploy steps and current findings: [getting-started.md](getting-started.md) and 
   - `az` does the sign-in, so the runners' `AzureCliCredential` works unchanged.
   - Result files stay on the runner because they name the endpoint. The reports don't, so they go to the job summary.
 
-## 14. Extending
+## 15. Extending
 
 | Goal | Where |
 | --- | --- |
@@ -953,8 +1113,9 @@ Deploy steps and current findings: [getting-started.md](getting-started.md) and 
 | Add tool tests | A JSONL file under `data/tool-tests/`; check it with `scripts/validate_eval_jsonl.py` |
 | Add agent scenarios | A JSONL file under `data/agent-evals/` |
 | Add an ASSERT behavior | A new config in `evals/configs/` (one behavior per config), run with `scripts/run_assert.py` |
+| Judge with other Foundry evaluators | `run_cloud_eval.py --evaluators` with built-in names (without `builtin.`); each set gets its own evaluation, and the report describes evaluators outside `CLOUD_REASONS` in general terms |
 | Add an assertion type | `$defs.assertion` in `schemas/tool-test.schema.json`, `ASSERTION_FIELDS` in `evals/cases.py`, `check()` in `tooltests/run.py`, plus unit tests |
-| Add a failure reason | `Failure("code", message)` in the runner, and the code's meaning in `TOOL_REASONS` or `AGENT_REASONS` in `evals/reasons.py`; `tests/test_reasons.py` fails on undescribed codes |
+| Add a failure reason | `Failure("code", message)` in the runner, and the code's meaning in `TOOL_REASONS`, `AGENT_REASONS` or `CLOUD_REASONS` in `evals/reasons.py`; `tests/test_reasons.py` fails on undescribed codes |
 | Add a span attribute | `telemetry.span(...)` calls in the runners; document it in [telemetry.md](telemetry.md) |
 | Test a toolbox that passes the user's identity | [entra.md](entra.md): consent once, then allowed and denied cases that use `{{caller.*}}` placeholders |
 | Run suites daily in GitHub Actions | `.github/workflows/live.yml` and the `live` environment; see [live-ci.md](live-ci.md) |

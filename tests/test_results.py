@@ -27,6 +27,32 @@ class PassRateTests(unittest.TestCase):
         self.assertIsNone(results.pass_rates(self.runs("a", True) + self.runs("b", False)))
 
 
+class CloudVerdictTests(unittest.TestCase):
+    @staticmethod
+    def judged(cid, verdict, checks_passed, repetition=1):
+        checks = None if checks_passed is None else {"passed": checks_passed}
+        return {"case_id": cid, "verdict": verdict, "deterministic": checks, "repetition": repetition}
+
+    def test_an_evaluator_that_gave_no_verdict_errored_unless_it_did_not_apply(self):
+        outcome = results.score_outcome
+        self.assertEqual(outcome({"status": "completed", "passed": False, "label": "fail"}), "failed")
+        self.assertEqual(outcome({"status": "completed", "passed": None, "label": "pass"}), "errored")
+        self.assertEqual(outcome({"status": "error", "passed": None, "label": None}), "errored")
+        self.assertEqual(outcome({"status": "skipped", "passed": None, "label": "not_applicable"}), "not applicable")
+        tally = results.evaluator_tally([{"scores": {"e": {"status": "completed", "passed": True}}},
+                                         {"scores": {"e": {"status": "error"}}}, {"scores": {}}])
+        self.assertEqual(tally, {"e": {"passed": 1, "errored": 1}})
+
+    def test_agreement_compares_pass_or_fail_verdicts_with_the_checks(self):
+        found = results.agreement([
+            self.judged("a", "pass", True), self.judged("b", "fail", True), self.judged("b", "fail", True, 2),
+            self.judged("c", "pass", False), self.judged("d", "fail", False),
+            self.judged("e", "error", True), self.judged("f", "not_judged", False), self.judged("g", "pass", None)])
+        self.assertEqual(found, {"results": 5, "agree": 2, "both_passed": 1, "both_failed": 1, "judge_only": 2,
+                                 "checks_only": 1, "judge_only_turns": ["b"], "checks_only_turns": ["c"]})
+        self.assertIsNone(results.agreement([self.judged("e", "error", True), self.judged("g", "pass", None)]))
+
+
 class WriteRunTests(unittest.TestCase):
     def test_runs_in_the_same_second_get_unique_names_in_run_order(self):
         t0 = datetime(2026, 11, 7, 12, 0, 0, tzinfo=timezone.utc)

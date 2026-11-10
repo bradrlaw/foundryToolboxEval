@@ -54,6 +54,21 @@ AGENT_REASONS = {
     "runner_error": "No reply: the request raised, for example an HTTP error from the Responses API.",
 }
 
+# Cloud evaluation (evals/run_cloud_eval.py). A turn an evaluator fails gets the evaluator's name as its reason;
+# scripts/report.py describes built-in evaluators missing here in general terms.
+CLOUD_REASONS = {
+    "task_adherence": "The judge found that the reply strays from the agent's instructions or the user's task, for "
+                      "example a figure it can't trace to a tool result in the conversation (scored 1 or 0).",
+    "intent_resolution": "The judge found that the reply doesn't resolve what the user asked (scored 1 to 5, failing "
+                         "below 3).",
+    "tool_call_accuracy": "The judge found the turn's tool calls wrong, incomplete or unneeded (scored 1 to 5, failing "
+                          "below 3).",
+    "evaluator_error": "An evaluator couldn't judge the turn, for example because an input it needs was missing.",
+    "agent_error": "Foundry's call to the agent failed (--target), so there was no reply to judge.",
+    "not_judged": "No verdict: the turn has no stored response (its agent request failed or never ran), or the "
+                  "evaluation run returned no result for it.",
+}
+
 
 def tally(results: list[dict]) -> Counter:
     """Failed cases per reason; a case counts once for each of its reasons, however many of its runs failed."""

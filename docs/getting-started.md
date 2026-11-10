@@ -12,7 +12,8 @@ test layer. If you already have a Foundry project, toolbox and agent, skip to
 | Microsoft Foundry resource + project | Create in the Azure portal / ai.azure.com. Note the project endpoint: `https://<resource>.services.ai.azure.com/api/projects/<project>` |
 | Chat model deployment in the project | For the agent, e.g. `gpt-4-1-mini` |
 | Judge model deployment (ASSERT only) | Default config uses `gpt-5.6-sol`; any strong model works if you edit the YAML `azure/<deployment>` names. The deployment must be on the same resource as `AZURE_API_BASE` |
-| Foundry roles | **Azure AI User** (or higher) on the project for the signed-in user; **Cognitive Services OpenAI User** on the resource for the judge |
+| Evaluator judge deployment (Foundry's evaluators only) | `run_cloud_eval` uses `gpt-4-1-mini`, the agent's deployment, unless `FOUNDRY_EVAL_JUDGE_DEPLOYMENT` or `--judge` names another deployment in the project |
+| Foundry roles | **Azure AI User** (or higher) on the project for the signed-in user; **Cognitive Services OpenAI User** on the resource for the judge. Foundry's evaluators call a model deployment, which needs **Azure AI User** (renamed **Foundry User**) on the Foundry resource, not only the project ([Learn](https://learn.microsoft.com/azure/foundry/observability/how-to/evaluation-permissions)) |
 | Tools | Python 3.11+, Azure CLI (`az`), Git. Docker is not required (`az acr build` builds in the cloud) |
 
 ```powershell
@@ -97,20 +98,26 @@ To test a different toolbox endpoint, pass `--endpoint <url>`, or copy `config\t
 .\.venv\Scripts\python scripts\run_assert.py evals\configs\ungrounded_figures.yaml
 .\.venv\Scripts\python scripts\run_assert.py evals\configs\tool_error_handling.yaml
 
+# Foundry's built-in evaluators judge the newest agent-eval run's stored replies; results go to results\cloud-evals
+.\.venv\Scripts\python -m evals.run_cloud_eval
+
 # Reports (markdown): pass rates, why cases failed; add --baseline <older run> to diff
 .\.venv\Scripts\python scripts\report.py tool
 .\.venv\Scripts\python scripts\report.py agent
+.\.venv\Scripts\python scripts\report.py cloud
 .\.venv\Scripts\python scripts\report.py assert results\assert\results\<suite>\<run>
 ```
 
-Expected for the samples: tool tests 14/14 and agent evals 10/10. In the `tool_error` turns (`c-private`,
+Expected for the samples: tool tests 14/14 and agent evals 12/12. In the `tool_error` turns (`c-private`,
 `c-unknown-customer`) a tool returns an error, and the agent must explain it without leaking the raw error text. If the
 platform aborts the request instead (see Troubleshooting), those turns fail as `platform_abort`. ASSERT results vary from
 run to run, and the November 2026 runs still found violations ([findings](../deploy/README.md#assert-findings)).
+In November 2026 Foundry's evaluators passed 9 of the 12 turns: they failed both `tool_error` turns and the second turn
+of `c-recall`, which the checks pass ([findings](../deploy/README.md#foundry-evaluator-findings)).
 
-Both runners exit 0 when everything passes, 1 when a case fails, and 2 on invalid cases or a setup error. A run with
-failures ends with a line such as `Failed by reason: tool_error 3, assertion 3, missing_tool 1`; the report lists each
-failure under its reason.
+The runners exit 0 when everything passes, 1 when a case fails, and 2 on invalid cases or a setup error (the cloud
+runner also when the evaluation run fails). A run with failures ends with a line such as
+`Failed by reason: tool_error 3, assertion 3, missing_tool 1`; the report lists each failure under its reason.
 
 Add telemetry with [telemetry.md](telemetry.md), and daily runs in GitHub Actions with [live-ci.md](live-ci.md).
 
@@ -135,6 +142,7 @@ that can register apps and grant admin consent. The first run prints a one-time 
 | Agent turns fail as `tool_listing_failed` or `tool_call_failed`, and the error names protocol version `2026-07-28` | The MCP server was starting from zero. Keep `--min-replicas 1` ([findings](../deploy/README.md#findings)) |
 | Every tool call times out (`transport_error`: `Request 'tools/call' timed out`) | The toolbox gets no answer from the MCP server. Check its replicas with `az containerapp replica list`: a container that stays not ready is stuck starting. A new revision replaced one ([findings](../deploy/README.md#findings)) |
 | Intermittent DNS / connection errors | Transient; the runners retry. Rerun failed ASSERT stages, completed stages are cached |
+| `run_cloud_eval` fails later turns as `evaluator_error`: `Invalid content type 'input_text' for message with role 'assistant'` | The agent-eval run replayed its history before the agent target sent earlier replies as `output_text`. Judge a newer run |
 | ASSERT writes into site-packages | Run configs through `scripts\run_assert.py`, which sets an absolute `artifacts_root` |
 | ASSERT judge output truncated | Keep `max_tokens: 24000` for the judge |
 | `pip` conflicts with openai | Don't install `azure-ai-projects` in this venv |

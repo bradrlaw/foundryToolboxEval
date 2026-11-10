@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from evals.reasons import AGENT_REASONS, TOOL_REASONS
+from evals.reasons import AGENT_REASONS, CLOUD_REASONS, TOOL_REASONS
 
 ROOT = Path(__file__).resolve().parent.parent
 spec = importlib.util.spec_from_file_location("report", ROOT / "scripts" / "report.py")
@@ -173,6 +173,77 @@ class ProvenanceReportTests(unittest.TestCase):
         # Agent runs from before the choice replayed the conversation.
         self.assertIn("- Changed since the baseline: history replay -> chain", text)
         self.assertNotIn("History:", report.case_report("Tool tests", ran(), None))
+
+
+class CloudReportTests(unittest.TestCase):
+    OK = {"status": "completed", "passed": True, "label": "pass", "score": 5}
+    BAD = {"status": "completed", "passed": False, "label": "fail", "score": 0}
+    BROKEN = {"status": "error", "passed": None, "label": None, "score": None}
+    NOT_APPLICABLE = {"status": "skipped", "passed": None, "label": "not_applicable", "score": None}
+
+    @staticmethod
+    def judged(n, verdict, scores, *failures, checks=None):
+        """Turn c#n of a cloud evaluation: the judge's verdict with its (reason, message) failures, and the
+        deterministic checks' result: passed, or the reasons they failed."""
+        return {"conversation_id": "c", "turn_number": n, "repetition": 1, "category": "a", "verdict": verdict,
+                "passed": verdict in ("pass", "skipped"), "failures": [m for _, m in failures],
+                "reasons": [k for k, _ in failures], "scores": scores,
+                "deterministic": None if checks is None else {"passed": checks is True,
+                                                              "reasons": [] if checks is True else checks}}
+
+    def report(self, **kw):
+        ok, bad = self.OK, self.BAD
+        results = [
+            self.judged(1, "pass", {"task_adherence": ok, "tool_call_accuracy": ok}, checks=True),
+            self.judged(2, "fail", {"task_adherence": bad, "tool_call_accuracy": self.NOT_APPLICABLE},
+                        ("task_adherence", "task_adherence fail (score 0): a figure in no tool result"), checks=True),
+            self.judged(3, "pass", {"task_adherence": ok, "tool_call_accuracy": ok}, checks=["missing_call"]),
+            self.judged(4, "error", {"task_adherence": ok, "tool_call_accuracy": self.BROKEN},
+                        ("evaluator_error", "tool_call_accuracy error: no tool definitions"), checks=True),
+            self.judged(5, "fail", {"coherence": bad}, ("coherence", "coherence fail (score 0): rambles"))]
+        run = {"kind": "cloud", "timestamp": "t", "source": "responses", "agent_name": "assistant",
+               "agent_run": "run-a.json", "history": "chain", "max_turns": 2, "judge": "gpt-4-1-mini",
+               "evaluators": ["task_adherence", "tool_call_accuracy", "coherence"],
+               "eval_name": "toolbox-eval-responses-12345678", "eval_run_id": "r1", "duration_s": 25,
+               "judge_usage": {"input_tokens": 9000, "output_tokens": 1000, "total_tokens": 10000},
+               "agent_usage": None, "results": results, **kw}
+        return report.case_report("Cloud evaluation", run, None, report.cloud_meanings(run), report.cloud_intro(run),
+                                  report.judge_vs_checks(results))
+
+    def test_says_what_was_judged_how_each_evaluator_judged_it_and_where_the_judge_and_checks_disagree(self):
+        text = self.report()
+        self.assertIn("Run `t`: **2/5 passed**\n\n"
+                      "History: chain (later turns continued the previous turn's stored response).\n\n"
+                      "Judged the stored responses of agent run `run-a.json`; the evaluators saw up to 2 turns of "
+                      "each conversation.\n\n"
+                      "Judge `gpt-4-1-mini`, built-in evaluators `task_adherence`, `tool_call_accuracy`, `coherence`. "
+                      "Evaluation `toolbox-eval-responses-12345678`, run `r1`, 25 s.\n\n"
+                      "Verdicts: pass 2, fail 2, error 1. Judge tokens: 10,000 (9,000 input, 1,000 output).\n\n"
+                      "| Evaluator | Passed | Failed | Errored | Not applicable |\n"
+                      "| --- | ---: | ---: | ---: | ---: |\n"
+                      "| `task_adherence` | 3 | 1 | 0 | 0 |\n"
+                      "| `tool_call_accuracy` | 2 | 0 | 1 | 1 |\n"
+                      "| `coherence` | 0 | 1 | 0 | 0 |\n", text)
+        # c#4 errored and c#5 has no checks result, so neither is compared.
+        self.assertIn("## Judge vs. deterministic checks\n\n"
+                      "Of the 3 replies with a pass or fail verdict and a checks result, the judge and the checks "
+                      "agree on 1.\n\n"
+                      "| | Checks passed | Checks failed |\n| --- | ---: | ---: |\n"
+                      "| Judge passed | 1 | 1 |\n| Judge failed | 1 | 0 |\n\n"
+                      "- Failed by the judge only: `c#2` (task_adherence)\n"
+                      "- Failed by the checks only: `c#3` (missing_call)\n", text)
+        self.assertIn(f"| `task_adherence` | 1 | {CLOUD_REASONS['task_adherence']} |", text)
+        self.assertIn("| `coherence` | 1 | The judge failed the turn on the built-in coherence evaluator. |", text)
+        self.assertIn("- `c#4`: tool_call_accuracy error: no tool definitions", text)
+        self.assertNotIn("Tokens:", text)
+
+    def test_a_target_run_says_which_cases_foundry_sent_and_the_agents_tokens(self):
+        usage = {"input_tokens": 900, "output_tokens": 100, "total_tokens": 1000}
+        text = self.report(source="target", history=None, cases=["data/x.jsonl"], left_out=["c#2"], agent_usage=usage)
+        self.assertIn("Foundry sent the first turn of each conversation in `data/x.jsonl` to agent `assistant` and "
+                      "judged its reply. Later turns left out (a target run can't continue a conversation): 1.", text)
+        self.assertIn("Agent tokens: 1,000 (900 input, 100 output).", text)
+        self.assertNotIn("History:", text)
 
 
 class AssertReportTests(unittest.TestCase):

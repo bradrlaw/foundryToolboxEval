@@ -1,8 +1,9 @@
-"""Run files and their results, shared by both runners and scripts/report.py."""
+"""Run files and their results, shared by the runners and scripts/report.py."""
 from __future__ import annotations
 
 import json
 import time
+from collections import Counter
 from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
@@ -51,6 +52,44 @@ def extra_calls_by_case(results: list[dict]) -> dict[str, int]:
         if r.get("extra_calls"):
             out[result_id(r)] = out.get(result_id(r), 0) + r["extra_calls"]
     return out
+
+
+def score_outcome(score: dict) -> str:
+    """What one evaluator made of a turn in a cloud evaluation: passed, failed, errored (it couldn't judge the turn)
+    or not applicable (as tool_call_accuracy on a turn without tool calls)."""
+    if score.get("status") == "skipped" or score.get("label") == "not_applicable":
+        return "not applicable"
+    if score.get("status") != "completed" or not isinstance(score.get("passed"), bool):
+        return "errored"
+    return "passed" if score["passed"] else "failed"
+
+
+def evaluator_tally(results: list[dict]) -> dict[str, Counter]:
+    """Per evaluator of a cloud evaluation, how many results had each outcome (score_outcome)."""
+    out: dict[str, Counter] = {}
+    for r in results:
+        for name, score in (r.get("scores") or {}).items():
+            out.setdefault(name, Counter())[score_outcome(score)] += 1
+    return out
+
+
+def agreement(results: list[dict]) -> dict | None:
+    """How a cloud evaluation's verdicts compare with the deterministic checks of the agent run it judged, over the
+    results with both: a pass or fail verdict, and the checks' result. Counts every run of a repeated turn and lists
+    the turns where the two disagree. None when no result has both."""
+    both = [r for r in results if r.get("deterministic") and r.get("verdict") in ("pass", "fail")]
+    if not both:
+        return None
+    pairs = [(r["verdict"] == "pass", bool(r["deterministic"]["passed"])) for r in both]
+
+    def turns(judge: bool, checks: bool) -> list[str]:
+        return list(dict.fromkeys(result_id(r) for r, pair in zip(both, pairs) if pair == (judge, checks)))
+
+    cells = Counter(pairs)
+    return {"results": len(both), "agree": cells[(True, True)] + cells[(False, False)],
+            "both_passed": cells[(True, True)], "both_failed": cells[(False, False)],
+            "judge_only": cells[(False, True)], "checks_only": cells[(True, False)],
+            "judge_only_turns": turns(False, True), "checks_only_turns": turns(True, False)}
 
 
 def write_run(folder: Path, record: Callable[[str], dict]) -> Path:

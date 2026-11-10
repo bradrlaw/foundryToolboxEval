@@ -12,6 +12,8 @@ from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
+from evals import retry
+
 # Import without the real .env or App Insights: the target reads its settings at import time.
 with mock.patch.dict(os.environ, {"FOUNDRY_PROJECT_ENDPOINT": "https://example.test/api/projects/p/"}), \
         mock.patch("dotenv.load_dotenv"), mock.patch("evals.telemetry.init"):
@@ -111,13 +113,13 @@ class PostResponsesTests(unittest.TestCase):
 
 class RetryDelayTests(unittest.TestCase):
     def test_backoff_without_hints(self):
-        self.assertEqual([target.retry_delay(n) for n in range(5)], [5, 10, 20, 30, 30])
+        self.assertEqual([retry.retry_delay(n) for n in range(5)], [5, 10, 20, 30, 30])
 
     def test_server_hints(self):
-        self.assertEqual(target.retry_delay(0, {"retry-after-ms": "1500"}), 1.5)
-        self.assertEqual(target.retry_delay(0, {"Retry-After": "999"}), target.MAX_RETRY_AFTER_S)
-        self.assertEqual(target.retry_delay(0, {"Retry-After": "Wed, 21 Oct 2015 07:28:00 GMT"}), 0)
-        self.assertEqual(target.retry_delay(2, {"Retry-After": "soon"}), 20)
+        self.assertEqual(retry.retry_delay(0, {"retry-after-ms": "1500"}), 1.5)
+        self.assertEqual(retry.retry_delay(0, {"Retry-After": "999"}), retry.MAX_RETRY_AFTER_S)
+        self.assertEqual(retry.retry_delay(0, {"Retry-After": "Wed, 21 Oct 2015 07:28:00 GMT"}), 0)
+        self.assertEqual(retry.retry_delay(2, {"Retry-After": "soon"}), 20)
 
 
 class RunAgentTests(unittest.TestCase):
@@ -240,6 +242,16 @@ class RunAgentTests(unittest.TestCase):
         (span,) = exporter.get_finished_spans()
         self.assertEqual((span.attributes["eval.previous_response_id"], span.attributes["gen_ai.response.id"]),
                          ("resp_1", "resp_2"))
+
+    def test_an_earlier_reply_is_sent_as_output_text_so_foundry_evaluators_accept_it(self):
+        data = {"id": "resp_2", "status": "completed", "output": []}
+        with mock.patch.object(target, "_post_responses", return_value=(data, 50.0, 1, 50.0)) as post:
+            target.run_agent([{"role": "user", "content": "u1"}, {"role": "assistant", "content": "a1"},
+                              {"role": "user", "content": "u2"}])
+        self.assertEqual(post.call_args.args[0]["input"], [
+            {"role": "user", "content": "u1"},
+            {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "a1"}]},
+            {"role": "user", "content": "u2"}])
 
 
 def answered(text, response_id=None, abort=False):

@@ -144,7 +144,7 @@ def score_turn(case: dict, result: dict) -> list[Failure]:
     if bad and not result.get("platform_abort") and re.search(bad, result["text"], re.I | re.S):
         failures.append(Failure("forbidden_response", f"response matches forbidden /{bad}/"))
 
-    if (limit := case.get("max_latency_ms")) and result["latency_ms"] > limit:
+    if (limit := case.get("max_latency_ms")) and result.get("latency_ms") is not None and result["latency_ms"] > limit:
         failures.append(Failure("latency", f"latency {result['latency_ms']:.0f}ms > {limit}ms"))
     return failures
 
@@ -280,7 +280,7 @@ def summary(results: list[dict]) -> list[str]:
     return lines
 
 
-def _at_least_one(text: str) -> int:
+def at_least_one(text: str) -> int:
     try:
         n = int(text)
     except ValueError:
@@ -294,7 +294,7 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="Run agent-eval conversations against the Foundry agent and score its tool calls.")
     ap.add_argument("cases", nargs="+", help="agent-eval JSONL files or glob patterns")
     ap.add_argument("--agent", help="agent name (default: $FOUNDRY_AGENT_NAME, else customer-assistant)")
-    ap.add_argument("--repetitions", type=_at_least_one, default=1, metavar="N",
+    ap.add_argument("--repetitions", type=at_least_one, default=1, metavar="N",
                     help="run every conversation N times, each from a fresh history; a turn passes only if every run "
                          "passes (default 1)")
     ap.add_argument("--history", choices=("chain", "replay"),

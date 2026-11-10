@@ -5,7 +5,8 @@ Evaluate how well a Microsoft Foundry **toolbox** works, at two levels:
 1. **Tool tests** (unit-test style) - call the toolbox's tools directly over its MCP
    endpoint and assert on correctness, schema conformance, error handling, and latency.
 2. **Agent evals** - run a Foundry agent connected to the toolbox against scenarios and check
-   that it selects the right tools, passes the right arguments, and gives a good answer.
+   that it selects the right tools, passes the right arguments, and gives a good answer: with deterministic checks,
+   with Microsoft ASSERT as an LLM judge, or with Foundry's built-in evaluators.
 
 Terminology: *tests* call the toolbox directly; *evals* involve an agent.
 
@@ -19,7 +20,7 @@ Docs: [getting started](docs/getting-started.md) (deploy and run the samples), [
 | Path | Purpose |
 | --- | --- |
 | `tooltests/` | Tool-test runner: an MCP client for the toolbox endpoint |
-| `evals/` | Deterministic agent-eval runner, the agent target ASSERT calls (`foundry_agent/target.py`), ASSERT configs (`configs/`), shared auth, case loading and telemetry |
+| `evals/` | Deterministic agent-eval runner, Foundry cloud-evaluation runner (`run_cloud_eval.py`), the agent target ASSERT calls (`foundry_agent/target.py`), ASSERT configs (`configs/`), shared auth, case loading, retries and telemetry |
 | `schemas/` | JSON Schemas for tool-test and agent-eval JSONL |
 | `data/tool-tests/`, `data/agent-evals/` | Tool-test cases and agent-eval scenarios (JSONL) |
 | `config/` | Optional target config example; `*.local.json` is git-ignored |
@@ -33,9 +34,10 @@ Docs: [getting started](docs/getting-started.md) (deploy and run the samples), [
 
 ## Status
 
-Working: sample MCP server, tool-test runner, deterministic agent-eval runner, ASSERT behavior configs, reports that show
-why cases failed, App Insights telemetry, offline CI, daily live runs in CI ([docs/live-ci.md](docs/live-ci.md)), and
-per-user Entra identity through OAuth2 identity passthrough ([docs/entra.md](docs/entra.md)).
+Working: sample MCP server, tool-test runner, deterministic agent-eval runner, ASSERT behavior configs, Foundry cloud
+evaluation with the built-in evaluators, reports that show why cases failed, App Insights telemetry, offline CI, daily
+live runs in CI ([docs/live-ci.md](docs/live-ci.md)), and per-user Entra identity through OAuth2 identity passthrough
+([docs/entra.md](docs/entra.md)).
 
 ## Setup
 
@@ -153,11 +155,44 @@ tool errors well (`graceful_error` violated in 2 of 18). Grounding rules in v4's
 violations to 9; each one left follows a direct user instruction that the rules forbid. Tool errors, which aborted the
 agent request through October 2026, now reach the model as text.
 
+## Agent evals with Foundry's evaluators
+
+Foundry's evaluation service can judge the agent server-side with its built-in evaluators: `task_adherence`,
+`intent_resolution` and `tool_call_accuracy` by default (`--evaluators`), judged by the model deployment `--judge`, else
+`FOUNDRY_EVAL_JUDGE_DEPLOYMENT`, else `gpt-4-1-mini` (how it works:
+[architecture](docs/architecture.md#8-foundry-evaluators)):
+
+```powershell
+.\.venv\Scripts\python -m evals.run_cloud_eval                      # the stored replies of the newest agent run
+.\.venv\Scripts\python -m evals.run_cloud_eval results\agent-evals\run-<timestamp>.json
+.\.venv\Scripts\python -m evals.run_cloud_eval --target data\agent-evals\sample-toolbox.jsonl   # Foundry calls the agent
+```
+
+By default Foundry judges the replies an agent-eval run already got, read by their stored `response_id`, each with up to
+`--max-turns` turns of its conversation (default: the run's longest), so the agent isn't called again. With `--target`,
+Foundry sends the first turn of each conversation to the agent (`--agent`) itself and the runner also scores that reply
+with the deterministic checks; later turns are left out, because a target run can't continue a conversation.
+
+Each turn gets a verdict: `pass`, `fail` (an evaluator failed it), `error` (an evaluator couldn't judge it, or Foundry's
+call to the agent failed), `skipped` (no evaluator applied to the turn) or `not_judged`. Each result keeps every
+evaluator's score, threshold and reason beside the same turn's deterministic result, and the console and report show
+where the judge and the checks agree. The runner reuses one evaluation per set of settings
+(`toolbox-eval-<source>-<hash>`), waits up to `--timeout` minutes (default 30) for the run, prints its portal link
+(except in GitHub Actions) and writes `results\cloud-evals\run-*.json`. It exits 0 when every turn passed, 1 when one
+didn't, and 2 on a setup or API error or when the evaluation run failed, was canceled or ran out of time. When the judge
+and the agent share a model deployment they share its rate limit, so run one job at a time.
+
+Findings ([deploy/README.md](deploy/README.md#foundry-evaluator-findings)): on the sample suite the judge agreed with the
+checks on 9 of 12 turns, and every disagreement was a correct turn it failed. `tool_call_accuracy` scores a correct call
+that returns an error 2 of 5 for making no successful retry, and `task_adherence` fails a figure recalled from an
+earlier lookup, since it sees earlier turns without their tool results.
+
 ## Reports
 
 ```powershell
 .\.venv\Scripts\python scripts\report.py tool  [run.json] [--baseline older.json]     # newest run by default
 .\.venv\Scripts\python scripts\report.py agent [run.json] [--baseline older.json]
+.\.venv\Scripts\python scripts\report.py cloud [run.json] [--baseline older.json]
 .\.venv\Scripts\python scripts\report.py assert results\assert\results\<suite>\<run> [--baseline <other run dir>] [--out report.md]
 ```
 
@@ -168,7 +203,10 @@ grouped by reason; regressions against a baseline list their reasons, and the re
 baseline (for example ``agent `customer-assistant` v2 -> v3``). Runs recorded before reasons existed show `unrecorded`.
 Agent reports count the tool calls beyond those expected. For a run with `--repetitions`, they count a turn as passed only
 if every run passed, in the totals, categories and regressions alike; they add pass@1, pass@k, pass^k and the flaky turns,
-and list a failure that recurs over a turn's runs once, for example `[2/3 runs]`. The ASSERT report adds what the run ran
+and list a failure that recurs over a turn's runs once, for example `[2/3 runs]`. The cloud report adds the judge and
+evaluators, verdict counts, a table of each evaluator's passes, failures, errors and turns it didn't apply to, the judge's
+tokens (and in target mode the agent's), and *Judge vs. deterministic checks*: how often the two agree, and the turns
+only one of them failed. The ASSERT report adds what the run ran
 against (from `provenance.json`, and what changed since a baseline that has one), each violation with the judge's
 justification per dimension, and
 the error for each case it couldn't score (for example the Responses API's error code and message).

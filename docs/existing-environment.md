@@ -7,7 +7,11 @@ No sample deployment is needed. Point the framework at what you already have and
 - Foundry project endpoint, and the toolbox name (consumer endpoint: `<project>/toolboxes/<toolbox>/mcp?api-version=v1`).
 - The agent name (a Foundry agent whose tools include that toolbox) for evals.
 - Signed-in identity (`az login`) with **Azure AI User** on the project (call toolbox and agent). For ASSERT, also
-  **Cognitive Services OpenAI User** on the resource hosting the judge model.
+  **Cognitive Services OpenAI User** on the resource hosting the judge model. For Foundry's evaluators, which call a
+  model deployment, **Azure AI User** (renamed **Foundry User**) on the Foundry resource, not only the project
+  ([Learn](https://learn.microsoft.com/azure/foundry/observability/how-to/evaluation-permissions)).
+- For Foundry's evaluators, a model deployment in the project for their judge: set `FOUNDRY_EVAL_JUDGE_DEPLOYMENT` in
+  `.env` unless it is `gpt-4-1-mini`.
 - Python 3.11+ and the install steps from [getting-started.md](getting-started.md#2-install).
 
 ## 2. Configure
@@ -46,6 +50,7 @@ the same `conversation_id` run as one conversation. Add `--repetitions 3` to the
 .\.venv\Scripts\python scripts\validate_eval_jsonl.py data\tool-tests\mine.jsonl   # kind comes from the folder or first record; --kind overrides
 .\.venv\Scripts\python -m tooltests.run data\tool-tests\mine.jsonl
 .\.venv\Scripts\python -m evals.run_agent_evals data\agent-evals\mine.jsonl
+.\.venv\Scripts\python -m evals.run_cloud_eval     # Foundry's built-in evaluators judge that run's replies
 ```
 
 ## 4. ASSERT behaviors for your agent

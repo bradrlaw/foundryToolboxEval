@@ -142,6 +142,32 @@ With the grounding rules:
   result; chaining matters when an answer depends on an earlier tool result, as in the agent evals' `c-recall`, where
   the replayed agent made up a contract value in 2 of 4 runs and the chained one quoted the record in 4 of 4.
 
+## Foundry evaluator findings
+
+Foundry's built-in `task_adherence`, `intent_resolution` and `tool_call_accuracy` evaluators, judged by `gpt-4-1-mini`,
+ran in November 2026 on the sample suite against v4 (`python -m evals.run_cloud_eval`). The deterministic checks passed
+every turn below:
+
+| Run | Turns | Judge passed | Judge and checks agree | Judge tokens | Time |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| A chained agent run's stored responses | 12 | 9 | 9 | 92,699 | 161 s |
+| `--target`: Foundry calls the agent with each first turn | 10 | 8 | 8 | 68,422 | 129 s |
+
+- **Every disagreement was a correct turn the judge failed.** The three evaluators cost 6,800 to 7,700 judge tokens a
+  turn.
+- **`tool_call_accuracy` fails a correct call that returns an error.** Asked for a privately held customer's stock price,
+  or for an unknown customer, the agent made the right call and relayed the error. The evaluator called the call
+  relevant and correct, then scored it 2 of 5 because "the tool returned an error and no successful retry was made".
+- **`task_adherence` can't tell a recalled figure from a made-up one.** In `c-recall` turn 2 the chained agent quoted the
+  contract value its first lookup returned; the evaluator sees earlier turns as text, without their tool results, and
+  failed the reply for stating a figure no tool call had provided. A replayed run's made-up value on the same turn
+  failed for the same reason.
+- **Text history needed `output_text`.** A replayed run's later turns couldn't be judged at all: every evaluator
+  rejected "content type 'input_text' for message with role 'assistant'", how Foundry stores a plain-string reply.
+  The agent target (`evals\foundry_agent\target.py`) now sends earlier replies as `output_text`, so a replayed run's
+  later turns are judged like chained ones.
+- `intent_resolution` passed every turn.
+
 ## Agent
 
 Prompt agent `customer-assistant` (model `gpt-4-1-mini`) with the toolbox endpoint as an MCP tool (`require_approval: never`).

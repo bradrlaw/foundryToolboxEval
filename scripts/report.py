@@ -1,19 +1,22 @@
-"""Markdown reports for tool-test, agent-eval, and ASSERT runs, with optional baseline comparison.
+"""Markdown reports for tool-test, agent-eval, cloud-evaluation and ASSERT runs, with optional baseline comparison.
 
-Tool and agent reports say why cases failed: failures grouped by the reason code the runners record with each
-failure (evals/reasons.py). They also say what the run ran against (agent version and model, toolbox versions,
+Tool, agent and cloud reports say why cases failed: failures grouped by the reason code the runners record with
+each failure (evals/reasons.py). They also say what the run ran against (agent version and model, toolbox versions,
 commit) and, against a baseline, what of that changed. Agent reports say how later turns carried the conversation
 (history chain or replay). Agent runs repeated with --repetitions count a turn as passed
 only if every run passed, and add pass@1, pass@k and pass^k and the flaky turns. Agent reports also count the tool
-calls beyond those each turn expects. ASSERT reports list each violation with the judge's justification, and the
-cases that weren't scored with the target's error; with the provenance.json that scripts/run_assert.py writes, they
-also say what the run ran against, its history mode, agent calls and tokens.
+calls beyond those each turn expects. Cloud reports (evals/run_cloud_eval.py) add what was judged, the judge and its
+tokens, each evaluator's verdicts, and where the judge and the deterministic checks disagree. ASSERT reports list
+each violation with the judge's justification, and the cases that weren't scored with the target's error; with the
+provenance.json that scripts/run_assert.py writes, they also say what the run ran against, its history mode, agent
+calls and tokens.
 
 Usage:
   python scripts/report.py tool   [RUN.json] [--baseline RUN.json]
   python scripts/report.py agent  [RUN.json] [--baseline RUN.json]
+  python scripts/report.py cloud  [RUN.json] [--baseline RUN.json]
   python scripts/report.py assert RUN_DIR    [--baseline RUN_DIR]
-With no RUN given, the newest file under results/tool-tests or results/agent-evals is used.
+With no RUN given, the newest file under results/tool-tests, results/agent-evals or results/cloud-evals is used.
 Add --out FILE to write the report instead of printing it.
 """
 from __future__ import annotations
@@ -24,10 +27,12 @@ import statistics
 from collections import Counter, defaultdict
 from pathlib import Path
 
-from evals.reasons import AGENT_REASONS, TOOL_REASONS
-from evals.results import by_case, extra_calls_by_case, pass_rate_text, pass_rates, result_id
+from evals.reasons import AGENT_REASONS, CLOUD_REASONS, TOOL_REASONS
+from evals.results import (agreement, by_case, evaluator_tally, extra_calls_by_case, pass_rate_text, pass_rates,
+                           result_id)
 
 ROOT = Path(__file__).resolve().parent.parent
+FOLDERS = {"tool": "tool-tests", "agent": "agent-evals", "cloud": "cloud-evals"}
 UNRECORDED = "unrecorded"
 UNRECORDED_MEANING = "The result file predates failure reasons; see the messages."
 TARGET_ERROR = "[TARGET ERROR:"
@@ -190,9 +195,12 @@ HISTORY_TEXT = {"chain": "continued the previous turn's stored response",
 
 
 def history_mode(run: dict) -> str | None:
-    """How an agent run's later turns carried the conversation: chain or replay. Agent runs recorded before there
-    was a choice replayed it. None for tool runs."""
-    return (run.get("history") or "replay") if "agent" in run else None
+    """How an agent run's later turns carried the conversation: chain or replay; for a cloud evaluation, those of
+    the agent run it judged. Agent runs recorded before there was a choice replayed it. None for tool runs and
+    cloud evaluations of first turns."""
+    if run.get("history"):
+        return run["history"]
+    return "replay" if "agent" in run else None
 
 
 def ran_lines(run: dict) -> list[str]:
@@ -206,7 +214,15 @@ def ran_lines(run: dict) -> list[str]:
     return lines
 
 
-def case_report(title: str, current: dict, baseline: dict | None, meanings: dict[str, str] | None = None) -> str:
+def _tokens(usage: dict) -> str:
+    return (f"{usage.get('total_tokens') or 0:,} ({usage.get('input_tokens') or 0:,} input, "
+            f"{usage.get('output_tokens') or 0:,} output)")
+
+
+def case_report(title: str, current: dict, baseline: dict | None, meanings: dict[str, str] | None = None,
+                intro: list[str] | None = None, sections: list[str] | None = None) -> str:
+    """The report on a run of cases or turns. `intro` lines follow what the run ran against; `sections` come before
+    the failures."""
     res = current["results"]
     cases = per_case(res)
     passed = sum(r["passed"] for r in cases)
@@ -220,14 +236,14 @@ def case_report(title: str, current: dict, baseline: dict | None, meanings: dict
     else:
         lines = [f"# {title}", "", f"{run}: **{passed}/{len(cases)} passed**", ""]
     lines += ran_lines(current)
+    lines += intro or []
     lines += ["| Category | Passed | Total |", "| --- | ---: | ---: |"]
     lines += [f"| {c} | {p} | {t} |" for c, (p, t) in by_category(cases).items()]
     lats = sorted(x for x in (_latency(r) for r in cases) if x)
     if lats:
         lines += ["", f"Latency (per-case p50): median {lats[len(lats) // 2]:.0f} ms, max {lats[-1]:.0f} ms"]
     if usage := current.get("usage"):
-        lines += ["", f"Tokens: {usage.get('total_tokens') or 0:,} ({usage.get('input_tokens') or 0:,} input, "
-                      f"{usage.get('output_tokens') or 0:,} output)"]
+        lines += ["", f"Tokens: {_tokens(usage)}"]
     if any(r.get("extra_calls") is not None for r in res):
         extra = extra_calls_by_case(res)
         detail = f"{sum(extra.values())} ({', '.join(f'`{c}` {n}' for c, n in extra.items())})" if extra else "none"
@@ -238,6 +254,7 @@ def case_report(title: str, current: dict, baseline: dict | None, meanings: dict
         why = Counter(r["abort_reason"] for r in aborts if r.get("abort_reason"))
         detail = f" ({', '.join(f'{k} {n}' for k, n in why.most_common())})" if why else ""
         lines += ["", f"Platform aborts: {len(aborts)}{detail}. Turns with a history gap: {gaps}."]
+    lines += sections or []
     lines += why_failed(res, meanings or {})
     if baseline:
         d = diff_cases(cases, per_case(baseline["results"]))
@@ -253,6 +270,69 @@ def case_report(title: str, current: dict, baseline: dict | None, meanings: dict
         if d["slower"]:
             lines.append("- Slower (>25% p50): " + ", ".join(f"`{c}` {b:.0f}->{n:.0f} ms" for c, b, n in d["slower"]))
     return "\n".join(lines) + "\n"
+
+
+VERDICTS = {"pass": "pass", "fail": "fail", "error": "error", "skipped": "skipped (no evaluator applied)",
+            "not_judged": "not judged"}
+OUTCOMES = ("passed", "failed", "errored", "not applicable")
+
+
+def cloud_intro(run: dict) -> list[str]:
+    """A cloud evaluation's opening paragraphs: what it judged, with which judge and evaluators, the verdicts, the
+    tokens, and each evaluator's verdicts."""
+    if run.get("source") == "target":
+        cases = ", ".join(f"`{c}`" for c in run.get("cases") or []) or "the cases"
+        what = (f"Foundry sent the first turn of each conversation in {cases} to agent `{run.get('agent_name')}` "
+                "and judged its reply.")
+        if left := run.get("left_out"):
+            what += f" Later turns left out (a target run can't continue a conversation): {len(left)}."
+    else:
+        what = (f"Judged the stored responses of agent run `{run.get('agent_run')}`; the evaluators saw up to "
+                f"{run.get('max_turns')} turns of each conversation.")
+    took = f", {run['duration_s']} s" if run.get("duration_s") is not None else ""
+    evaluators = ", ".join(f"`{e}`" for e in run.get("evaluators") or [])
+    judge = (f"Judge `{run.get('judge')}`, built-in evaluators {evaluators}. Evaluation `{run.get('eval_name')}`, "
+             f"run `{run.get('eval_run_id')}`{took}.")
+    found = Counter(r.get("verdict") for r in run["results"])
+    counts = [f"{VERDICTS.get(v, v)} {found[v]}" for v in dict.fromkeys([*VERDICTS, *found]) if found[v]]
+    lines = [what, "", judge, "", f"Verdicts: {', '.join(counts) or 'none'}."]
+    for who, usage in (("Judge", run.get("judge_usage")), ("Agent", run.get("agent_usage"))):
+        if usage:
+            lines[-1] += f" {who} tokens: {_tokens(usage)}."
+    if tally := evaluator_tally(run["results"]):
+        names = [n for n in dict.fromkeys([*(run.get("evaluators") or []), *tally]) if n in tally]
+        lines += ["", "| Evaluator | " + " | ".join(o.capitalize() for o in OUTCOMES) + " |",
+                  "| --- |" + " ---: |" * len(OUTCOMES)]
+        lines += [f"| `{n}` | " + " | ".join(str(tally[n][o]) for o in OUTCOMES) + " |" for n in names]
+    return lines + [""]
+
+
+def judge_vs_checks(results: list[dict]) -> list[str]:
+    """How a cloud evaluation's verdicts compare with the deterministic checks of the same replies, with the turns
+    where they disagree and why the side that failed them did."""
+    if not (a := agreement(results)):
+        return []
+    cases = by_case(results)
+
+    def listed(turns: list[str], why) -> str:
+        return ", ".join(f"`{t}` ({', '.join(dict.fromkeys(k for r in cases[t] for k in why(r))) or 'no reason'})"
+                         for t in turns) or "none"
+
+    return ["", "## Judge vs. deterministic checks", "",
+            f"Of the {a['results']} replies with a pass or fail verdict and a checks result, the judge and the checks "
+            f"agree on {a['agree']}.", "",
+            "| | Checks passed | Checks failed |", "| --- | ---: | ---: |",
+            f"| Judge passed | {a['both_passed']} | {a['checks_only']} |",
+            f"| Judge failed | {a['judge_only']} | {a['both_failed']} |", "",
+            f"- Failed by the judge only: {listed(a['judge_only_turns'], lambda r: r.get('reasons') or [])}",
+            "- Failed by the checks only: "
+            + listed(a["checks_only_turns"], lambda r: (r.get("deterministic") or {}).get("reasons") or [])]
+
+
+def cloud_meanings(run: dict) -> dict[str, str]:
+    """What each reason in a cloud evaluation means: CLOUD_REASONS, and a general meaning for other evaluators."""
+    general = {e: f"The judge failed the turn on the built-in {e} evaluator." for e in run.get("evaluators") or []}
+    return {**general, **CLOUD_REASONS}
 
 
 def _jsonl(path: Path) -> list[dict]:
@@ -333,8 +413,7 @@ def assert_report(run_dir: Path, baseline_dir: Path | None) -> str:
         lines += ran_lines(prov)
         calls = f"Agent calls: {prov.get('requests', 0)} ({prov.get('continued', 0)} continued a stored response)"
         if usage := prov.get("usage"):
-            calls += (f". Tokens: {usage.get('total_tokens') or 0:,} ({usage.get('input_tokens') or 0:,} input, "
-                      f"{usage.get('output_tokens') or 0:,} output)")
+            calls += f". Tokens: {_tokens(usage)}"
         lines += [calls + ".", ""]
         if baseline_dir and (base_prov := assert_provenance(baseline_dir)) and ran_against(base_prov):
             changes = "; ".join(provenance_changes(prov, base_prov)) or "none"
@@ -376,7 +455,7 @@ def newest(folder: Path) -> Path:
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("kind", choices=["tool", "agent", "assert"])
+    ap.add_argument("kind", choices=["tool", "agent", "cloud", "assert"])
     ap.add_argument("run", nargs="?", type=Path)
     ap.add_argument("--baseline", type=Path)
     ap.add_argument("--out", type=Path)
@@ -387,14 +466,16 @@ def main() -> None:
             raise SystemExit("assert needs a run directory (results/assert/results/<suite>/<run>)")
         text = assert_report(args.run, args.baseline)
     else:
-        folder = ROOT / "results" / ("tool-tests" if args.kind == "tool" else "agent-evals")
-        run = args.run or newest(folder)
+        run = args.run or newest(ROOT / "results" / FOLDERS[args.kind])
         current = json.loads(run.read_text(encoding="utf-8"))
         baseline = json.loads(args.baseline.read_text(encoding="utf-8")) if args.baseline else None
         if args.kind == "tool":
             text = case_report("Tool tests", current, baseline, TOOL_REASONS)
-        else:
+        elif args.kind == "agent":
             text = case_report("Agent evals", current, baseline, AGENT_REASONS)
+        else:
+            text = case_report("Cloud evaluation", current, baseline, cloud_meanings(current), cloud_intro(current),
+                               judge_vs_checks(current["results"]))
 
     if args.out:
         args.out.parent.mkdir(parents=True, exist_ok=True)

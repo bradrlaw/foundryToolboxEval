@@ -16,14 +16,13 @@ import threading
 import time
 import urllib.error
 import urllib.request
-from datetime import datetime, timezone
-from email.utils import parsedate_to_datetime
 from pathlib import Path
 
 from dotenv import load_dotenv
 from opentelemetry import trace
 
 from evals import auth, telemetry, toolbox_errors
+from evals.retry import RETRY_STATUSES, retry_delay
 
 # Environment-specific values live in the git-ignored .env at the repo root.
 load_dotenv(Path(__file__).resolve().parents[2] / ".env")
@@ -49,8 +48,6 @@ SERVED_LOG = os.environ.get("FOUNDRY_EVAL_SERVED_LOG")
 REQUEST_TIMEOUT_S = 180
 # Local DNS outages have lasted minutes, so connection failures get about 2.5 minutes of backoff.
 MAX_ATTEMPTS = 8
-RETRY_STATUSES = {408, 429, 500, 502, 503, 504}
-MAX_RETRY_AFTER_S = 60.0
 
 
 class ResponsesAPIError(RuntimeError):
@@ -60,25 +57,6 @@ class ResponsesAPIError(RuntimeError):
         super().__init__(f"Responses API {status}: {body[:500]}")
         self.status, self.body, self.latency_ms, self.attempts = status, body, latency_ms, attempts
         self.elapsed_ms = latency_ms if elapsed_ms is None else elapsed_ms
-
-
-def retry_delay(attempt: int, headers=None) -> float:
-    """Seconds to wait before retrying after `attempt` (0-based): the server's retry-after-ms or
-    Retry-After (capped at 60 s), else exponential backoff of 5, 10, 20, then 30 s."""
-    hints = {k.lower(): v for k, v in headers.items()} if headers is not None else {}
-    for name, scale in (("retry-after-ms", 0.001), ("retry-after", 1.0)):
-        value = hints.get(name)
-        if value is None:
-            continue
-        try:
-            wait = float(value) * scale
-        except ValueError:
-            try:
-                wait = (parsedate_to_datetime(value) - datetime.now(timezone.utc)).total_seconds()
-            except (TypeError, ValueError):
-                continue
-        return min(MAX_RETRY_AFTER_S, max(0.0, wait))
-    return min(30.0, 5.0 * 2 ** attempt)
 
 
 def _post_responses(payload: dict) -> tuple[dict, float, int, float]:
@@ -182,6 +160,14 @@ def _aborted(span, text: str, reason: str, calls: list, meta: dict) -> dict:
     return {"text": text, "platform_abort": True, "abort_reason": reason, "tool_calls": calls, **meta}
 
 
+def _input_item(message: dict[str, str]) -> dict:
+    """An earlier reply goes in as an output message: Foundry stores plain-string assistant content as input_text,
+    which its evaluators reject, so cloud evaluation could not judge a turn sent with text history."""
+    if message["role"] != "assistant":
+        return message
+    return {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": message["content"]}]}
+
+
 def run_agent(messages: list[dict[str, str]], previous_response_id: str | None = None) -> dict:
     """Call the agent once with `messages`, continuing the stored response `previous_response_id` if given: the
     agent then has that conversation, tool results included, and `messages` are only what follows it.
@@ -213,7 +199,8 @@ def run_agent(messages: list[dict[str, str]], previous_response_id: str | None =
         span.set_attribute("gen_ai.agent.name", AGENT_NAME)
         span.set_attribute("input.value", messages[-1]["content"])
         # Every request names the agent, a continued one too: without it the API asks for a model.
-        payload = {"input": messages, "agent_reference": {"type": "agent_reference", "name": AGENT_NAME}}
+        payload = {"input": [_input_item(m) for m in messages],
+                   "agent_reference": {"type": "agent_reference", "name": AGENT_NAME}}
         if previous_response_id:
             payload["previous_response_id"] = previous_response_id
             span.set_attribute("eval.previous_response_id", previous_response_id)
