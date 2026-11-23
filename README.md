@@ -13,7 +13,7 @@ Terminology: *tests* call the toolbox directly; *evals* involve an agent.
 This repo is independent of `copilot-studio-evals`; it reuses the idea of a canonical
 JSONL format but defines its own schemas.
 
-Docs: [getting started](docs/getting-started.md) (deploy and run the samples), [existing environment](docs/existing-environment.md) (your own Foundry project/toolbox/agents), [Entra identity](docs/entra.md) (per-user identity passed through to an Entra-protected MCP server), [architecture](docs/architecture.md) (components, flows and diagrams), [telemetry](docs/telemetry.md) (App Insights), [live CI](docs/live-ci.md) (daily live runs in GitHub Actions), [plan](docs/plan.md).
+Docs: [getting started](docs/getting-started.md) (deploy and run the samples), [existing environment](docs/existing-environment.md) (your own Foundry project/toolbox/agents), [Entra identity](docs/entra.md) (per-user identity passed through to an Entra-protected MCP server), [architecture](docs/architecture.md) (components, flows and diagrams), [telemetry](docs/telemetry.md) (App Insights), [live CI](docs/live-ci.md) (daily live runs in GitHub Actions), [plan](docs/plan.md), [overview deck](docs/foundry-toolbox-eval-overview.pptx) (slides; built by [scripts/deck](scripts/deck/README.md)).
 
 ## Layout
 
@@ -24,10 +24,10 @@ Docs: [getting started](docs/getting-started.md) (deploy and run the samples), [
 | `schemas/` | JSON Schemas for tool-test, agent-eval and evaluator-calibration JSONL |
 | `data/tool-tests/`, `data/agent-evals/`, `data/evaluator-calibration/` | Tool-test cases, agent-eval scenarios, and turns with the verdicts this repo's evaluators should give them (JSONL) |
 | `config/` | Optional target config example; `*.local.json` is git-ignored |
-| `scripts/` | `validate_eval_jsonl.py`, `report.py`, `run_assert.py` (ASSERT wrapper), `check_figures.py` (the figure check against ASSERT's judge), `deploy_toolbox.py` (connection + toolbox, no auth or OAuth2 identity passthrough), `deploy_agent.py`, `setup_entra.py` (Entra apps for the Entra sample) |
+| `scripts/` | `validate_eval_jsonl.py`, `report.py`, `run_assert.py` (ASSERT wrapper), `check_figures.py` (the figure check against ASSERT's judge), `deploy_toolbox.py` (connection + toolbox, no auth or OAuth2 identity passthrough), `deploy_agent.py`, `setup_entra.py` (Entra apps for the Entra sample), `deck/` (builds the overview deck) |
 | `sample-mcp-server/` | Synthetic MCP server (`get_customer`, `get_market_conditions`, `get_stock_quote`) to deploy and test against; run locally with `.\.venv\Scripts\python sample-mcp-server\server.py` (`http://localhost:8000/mcp`). With `AUTH_MODE=entra` it accepts only Entra user tokens, filters customers by the caller's app roles and adds `whoami` |
 | `deploy/` | Notes and findings for the deployed sample toolbox |
-| `docs/` | Setup guides, architecture, telemetry, plan |
+| `docs/` | Setup guides, architecture, telemetry, plan, overview deck |
 | `tests/` | Offline unit tests |
 | `.github/workflows/` | CI: the offline checks on Ubuntu and Windows (`ci.yml`), and daily live runs (`live.yml`) |
 | `results/` | Run output (git-ignored) |

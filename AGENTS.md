@@ -16,6 +16,9 @@ agent connected to the toolbox, scored by deterministic checks, ASSERT and Found
   Use synthetic data only.
 - The judge prompts of this repo's Foundry evaluators are `evals\evaluators\*.md`. A prompt change needs a live
   calibration run (`python -m evals.calibrate_evaluators`, cases in `data\evaluator-calibration\`) before it's trusted.
+- The overview deck `docs\foundry-toolbox-eval-overview.pptx` is built by `scripts\deck\`, which has its own
+  `requirements.txt` (keep python-pptx out of the root one). Edit `slides_*.py`, then rebuild and verify
+  (`scripts\deck\README.md`); never edit the .pptx by hand. Update the deck when a change makes a slide wrong.
 - Never commit secrets, tenant-specific values or run output. Local values go in the git-ignored `.env`,
   `config\*.local.json` and `deploy\resources.local.md`.
 - Windows paths with backslashes.

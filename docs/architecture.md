@@ -166,6 +166,7 @@ flowchart TB
 | `scripts/validate_eval_jsonl.py` | Validates case files without running them |
 | `scripts/deploy_toolbox.py`, `deploy_agent.py`, `_az.py` | Create the connection (no auth, OAuth2 or UserEntraToken), toolbox version and agent version through `az rest`; for OAuth2, also the client secret and redirect URI on the client app |
 | `scripts/setup_entra.py` | Registers the Entra apps for the Entra sample through Microsoft Graph: the API app (scope, app roles, your role assignments) and the OAuth client app |
+| `scripts/deck/` | Builds the overview deck, `docs/foundry-toolbox-eval-overview.pptx`, with python-pptx (one function per slide), and checks it through PowerPoint for overflowing text and for what changed against another deck ([README](../scripts/deck/README.md)) |
 | `sample-mcp-server/` | Synthetic MCP server, packaged as a container image: three tools, plus Entra token validation (`entra_auth.py`), region filtering and `whoami` with `AUTH_MODE=entra` |
 | `tests/` | Offline unit tests: no Azure access or `.env` needed |
 | `.github/workflows/ci.yml` | CI on pushes to `main` and pull requests: dependency check, byte-compile, case validation and unit tests on Ubuntu (Python 3.11 and 3.14) and Windows (3.14). Offline only |
