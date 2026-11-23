@@ -11,6 +11,7 @@ dynamic = ["version"]
 dependencies = [
     "mcp>=2.3,<3",
     "httpx2>=2.13",
+    "certifi>=2026.10.19",
     "anyio>=4",
     "pydantic>=2",
     "jsonschema>=4.23",
